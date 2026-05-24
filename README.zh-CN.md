@@ -192,7 +192,7 @@ smart-search deep "https://example.com/source" --format json
 | Provider / 路线 | 用途 | 主要配置项 | 官方文档 | Key / 控制台 |
 | --- | --- | --- | --- | --- |
 | xAI Responses API | 主搜索，走 `web_search,x_search` 工具 | `XAI_API_KEY`、`XAI_API_URL`、`XAI_MODEL`、`XAI_TOOLS` | [docs.x.ai](https://docs.x.ai/docs) | [xAI API keys](https://console.x.ai/team/default/api-keys) |
-| OpenAI-compatible Chat Completions | 主搜索，适合 OpenAI 官方或兼容中转；这里不会发送 xAI search tools | `OPENAI_COMPATIBLE_API_URL`、`OPENAI_COMPATIBLE_API_KEY`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_STREAM` | [OpenAI platform docs](https://platform.openai.com/docs) | [OpenAI API keys](https://platform.openai.com/api-keys) 或你的兼容服务商 |
+| OpenAI-compatible Chat Completions | 主搜索，适合 OpenAI 官方或兼容中转；这里不会发送 xAI search tools | 旧单-provider 的 `OPENAI_COMPATIBLE_API_URL`、`OPENAI_COMPATIBLE_API_KEY`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_STREAM`；或 `OPENAI_COMPATIBLE_PROVIDERS` 加命名 `OPENAI_COMPATIBLE_<ID>_*` | [OpenAI platform docs](https://platform.openai.com/docs) | [OpenAI API keys](https://platform.openai.com/api-keys) 或你的兼容服务商 |
 | Exa | 官方文档、API、论文、产品页、可信网页的低噪声发现 | `EXA_API_KEY` | [Exa docs](https://docs.exa.ai/) | [Exa API keys](https://dashboard.exa.ai/api-keys) |
 | Context7 | SDK、库、框架、API 文档兜底 | `CONTEXT7_API_KEY`、`CONTEXT7_BASE_URL` | [Context7 docs](https://context7.com/docs) | [Context7](https://context7.com/) |
 | 智谱 Web Search API | 中文、国内、时效、域名过滤类来源发现 | `ZHIPU_API_KEY`、`ZHIPU_API_URL`、`ZHIPU_SEARCH_ENGINE` | [智谱联网搜索文档](https://docs.bigmodel.cn/cn/guide/tools/web-search) | [智谱 API keys](https://open.bigmodel.cn/usercenter/apikeys) |
@@ -204,6 +204,7 @@ smart-search deep "https://example.com/source" --format json
 
 - xAI 官方联网搜索路线是 Responses API `/responses`，只通过 `XAI_*` 配置。兼容中转/网关走 Chat Completions `/chat/completions`，只通过 `OPENAI_COMPATIBLE_*` 配置。
 - `OPENAI_COMPATIBLE_STREAM=true` 或 `smart-search search --stream` 只会给 OpenAI-compatible 的 `search` 和 provider 侧 `fetch` 设置 `stream=true`。它是中转长请求兼容开关，不改变 xAI Responses、URL 描述和来源排序行为。
+- `OPENAI_COMPATIBLE_PROVIDERS=grok-main,grok-backup` 可以在 OpenAI-compatible 这一条路线里开启有序 fallback。每个 id 会读取 `OPENAI_COMPATIBLE_<ID>_API_URL`、`_API_KEY`、可选 `_MODEL`、可选 `_STREAM`；id 会先归一化成 env 后缀（例如 `grok-main` -> `GROK_MAIN`）。如果 provider pool 没配置，旧单-provider key 的行为保持不变。
 - 旧的 `SMART_SEARCH_API_URL`、`SMART_SEARCH_API_KEY`、`SMART_SEARCH_API_MODE`、`SMART_SEARCH_MODEL`、`SMART_SEARCH_XAI_TOOLS` 不再是受支持配置项。请显式使用 `XAI_*` 或 `OPENAI_COMPATIBLE_*`。
 - 不要给 OpenAI-compatible Chat Completions 中转强塞 xAI 的 `web_search` / `x_search` 工具或旧 `search_parameters`。
 - 当前项目里的智谱是 Web Search API，不是 Chat Completions `tools=[web_search]`，不是 Search Agent，也不是 MCP Server。
@@ -275,6 +276,8 @@ smart-search anysearch-batch "AAPL" "RAG papers" --max-results 2 --format json
 | `OPENAI_COMPATIBLE_API_KEY` | OpenAI-compatible key |
 | `OPENAI_COMPATIBLE_MODEL` | 兼容模型名 |
 | `OPENAI_COMPATIBLE_STREAM` | OpenAI-compatible 中转兼容开关，接受 `true/1/yes`，默认 `false` |
+| `OPENAI_COMPATIBLE_PROVIDERS` | OpenAI-compatible provider 池，逗号分隔且按顺序尝试 |
+| `OPENAI_COMPATIBLE_<ID>_API_URL/_API_KEY/_MODEL/_STREAM` | 命名 provider 配置；至少需要 `_API_URL` + `_API_KEY`，其余可选；`<ID>` 会先归一化成 env 后缀 |
 | `ANYSEARCH_API_URL` | AnySearch JSON-RPC endpoint，默认 `https://api.anysearch.com/mcp` |
 | `ANYSEARCH_API_KEY` | 可选 AnySearch key |
 | `ANYSEARCH_TIMEOUT_SECONDS` | AnySearch 请求超时，默认 `30` |

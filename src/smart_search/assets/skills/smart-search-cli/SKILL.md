@@ -134,6 +134,7 @@ smart-search deep "https://example.com/source" --format json
 - `search` builds `main_search` from configured peer providers: `XAI_API_KEY` for xAI Responses and `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` for OpenAI-compatible Chat Completions.
 - Official xAI uses the Responses API `/responses` route through `XAI_*`. Compatible relays/gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
 - `OPENAI_COMPATIBLE_STREAM=true` or `search --stream` sets `stream=true` only for OpenAI-compatible `search` and provider-side `fetch`; it is a relay compatibility switch and does not affect xAI Responses, URL description, or source ranking.
+- `OPENAI_COMPATIBLE_PROVIDERS=grok-main,grok-backup` enables ordered fallback within the OpenAI-compatible lane. Each id reads `OPENAI_COMPATIBLE_<ID>_API_URL`, `_API_KEY`, optional `_MODEL`, and optional `_STREAM`; ids normalize to env suffixes (`grok-main` -> `GROK_MAIN`). If the pool is unset, the legacy single-provider keys keep their existing behavior.
 - Legacy `SMART_SEARCH_API_URL`, `SMART_SEARCH_API_KEY`, `SMART_SEARCH_API_MODE`, `SMART_SEARCH_MODEL`, and `SMART_SEARCH_XAI_TOOLS` are unsupported config keys.
 - xAI Responses mode may use only `XAI_TOOLS=web_search,x_search` and a subset of those tools.
 - Chat Completions mode must not send xAI `web_search` / `x_search` tools or legacy `search_parameters`; xAI Chat Completions Live Search is deprecated.
@@ -241,6 +242,11 @@ smart-search config set OPENAI_COMPATIBLE_API_URL "https://api.openai.com/v1" --
 smart-search config set OPENAI_COMPATIBLE_API_KEY "key" --format json
 smart-search config set OPENAI_COMPATIBLE_MODEL "model-id" --format json
 smart-search config set OPENAI_COMPATIBLE_STREAM "true" --format json
+smart-search config set OPENAI_COMPATIBLE_PROVIDERS "grok-main,grok-backup" --format json
+smart-search config set OPENAI_COMPATIBLE_GROK_MAIN_API_URL "https://relay1.example.com/v1" --format json
+smart-search config set OPENAI_COMPATIBLE_GROK_MAIN_API_KEY "key" --format json
+smart-search config set OPENAI_COMPATIBLE_GROK_BACKUP_API_URL "https://relay2.example.com/v1" --format json
+smart-search config set OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY "key" --format json
 smart-search config set ANYSEARCH_API_URL "https://api.anysearch.com/mcp" --format json
 smart-search config set ANYSEARCH_API_KEY "key" --format json
 smart-search config set ANYSEARCH_TIMEOUT_SECONDS "30" --format json
