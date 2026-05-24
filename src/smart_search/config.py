@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -7,7 +8,8 @@ class Config:
     _instance = None
     _SETUP_COMMAND = (
         "Run `smart-search setup`, or configure XAI_API_KEY and/or "
-        "OPENAI_COMPATIBLE_API_URL plus OPENAI_COMPATIBLE_API_KEY, then run "
+        "OPENAI_COMPATIBLE_API_URL plus OPENAI_COMPATIBLE_API_KEY, or "
+        "OPENAI_COMPATIBLE_PROVIDERS plus named OPENAI_COMPATIBLE_<PROVIDER>_* keys, then run "
         "`smart-search doctor --format json`."
     )
     _DEFAULT_MODEL = "grok-4-fast"
@@ -28,6 +30,7 @@ class Config:
         "OPENAI_COMPATIBLE_API_KEY",
         "OPENAI_COMPATIBLE_MODEL",
         "OPENAI_COMPATIBLE_STREAM",
+        "OPENAI_COMPATIBLE_PROVIDERS",
         "SMART_SEARCH_VALIDATION_LEVEL",
         "SMART_SEARCH_FALLBACK_MODE",
         "SMART_SEARCH_MINIMUM_PROFILE",
@@ -61,6 +64,7 @@ class Config:
         "SSL_VERIFY",
     }
     _LEGACY_CONFIG_KEYS: dict[str, str] = {}
+    _OPENAI_COMPATIBLE_DYNAMIC_FIELDS = {"API_URL", "API_KEY", "MODEL", "STREAM"}
 
     def __new__(cls):
         if cls._instance is None:
@@ -69,6 +73,197 @@ class Config:
             cls._instance._config_dir_source = None
             cls._instance._cached_model = None
         return cls._instance
+
+    @classmethod
+    def _parse_openai_compatible_numbered_key(cls, key: str) -> tuple[int, str] | None:
+        prefix = "OPENAI_COMPATIBLE_"
+        if not key.startswith(prefix):
+            return None
+        remainder = key[len(prefix):]
+        if "_" not in remainder:
+            return None
+        index_text, field = remainder.split("_", 1)
+        if not index_text.isdigit() or field not in cls._OPENAI_COMPATIBLE_DYNAMIC_FIELDS:
+            return None
+        return int(index_text), field
+
+    @classmethod
+    def _is_openai_compatible_numbered_key(cls, key: str) -> bool:
+        return cls._parse_openai_compatible_numbered_key(key) is not None
+
+    @classmethod
+    def _parse_openai_compatible_named_key(cls, key: str) -> tuple[str, str] | None:
+        prefix = "OPENAI_COMPATIBLE_"
+        if not key.startswith(prefix) or key == "OPENAI_COMPATIBLE_PROVIDERS":
+            return None
+        remainder = key[len(prefix):]
+        for field in sorted(cls._OPENAI_COMPATIBLE_DYNAMIC_FIELDS, key=len, reverse=True):
+            suffix = f"_{field}"
+            if not remainder.endswith(suffix):
+                continue
+            provider_key = remainder[: -len(suffix)]
+            if not provider_key or provider_key.isdigit():
+                return None
+            return provider_key, field
+        return None
+
+    @classmethod
+    def _is_openai_compatible_named_key(cls, key: str) -> bool:
+        return cls._parse_openai_compatible_named_key(key) is not None
+
+    @staticmethod
+    def _normalize_openai_compatible_provider_id(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
+        return normalized.strip("-_")
+
+    @staticmethod
+    def _openai_compatible_provider_env_key(provider_id: str) -> str:
+        token = re.sub(r"[^A-Z0-9]+", "_", provider_id.strip().upper())
+        return token.strip("_")
+
+    @classmethod
+    def _canonical_openai_compatible_named_key(cls, key: str) -> str:
+        parsed = cls._parse_openai_compatible_named_key(key)
+        if not parsed:
+            return key
+        provider_key, field = parsed
+        provider_id = cls._normalize_openai_compatible_provider_id(provider_key)
+        env_key = cls._openai_compatible_provider_env_key(provider_id or provider_key)
+        if not env_key:
+            return key
+        return f"OPENAI_COMPATIBLE_{env_key}_{field}"
+
+    @classmethod
+    def _canonical_config_key(cls, key: str) -> str:
+        normalized_key = key.strip().upper()
+        if cls._is_openai_compatible_named_key(normalized_key):
+            return cls._canonical_openai_compatible_named_key(normalized_key)
+        return normalized_key
+
+    @classmethod
+    def normalize_config_key(cls, key: str) -> str:
+        return cls._canonical_config_key(key)
+
+    @classmethod
+    def _normalize_openai_compatible_provider_ids_from_raw(cls, raw: str) -> list[str]:
+        provider_ids: list[str] = []
+        seen_env_keys: set[str] = set()
+        for item in raw.split(","):
+            provider_id = cls._normalize_openai_compatible_provider_id(item)
+            provider_env_key = cls._openai_compatible_provider_env_key(provider_id)
+            if not provider_id or not provider_env_key or provider_env_key in seen_env_keys:
+                continue
+            seen_env_keys.add(provider_env_key)
+            provider_ids.append(provider_id)
+        return provider_ids
+
+    @classmethod
+    def _normalize_openai_compatible_provider_value(cls, value: str) -> str:
+        return ",".join(cls._normalize_openai_compatible_provider_ids_from_raw(value))
+
+    @classmethod
+    def _legacy_openai_compatible_alias(cls, key: str) -> str | None:
+        parsed = cls._parse_openai_compatible_numbered_key(key)
+        if not parsed or parsed[0] != 1:
+            return None
+        return f"OPENAI_COMPATIBLE_{parsed[1]}"
+
+    @classmethod
+    def _is_supported_config_key(cls, key: str) -> bool:
+        return key in cls._CONFIG_KEYS or cls._is_openai_compatible_numbered_key(key) or cls._is_openai_compatible_named_key(key)
+
+    @staticmethod
+    def _truthy(value: str | None, default: bool = False) -> bool:
+        if value is None:
+            return default
+        return value.lower() in ("true", "1", "yes")
+
+    @classmethod
+    def _reset_model_cache_for_key(cls, key: str) -> bool:
+        return key in {
+            "XAI_API_URL",
+            "XAI_API_KEY",
+            "XAI_MODEL",
+            "XAI_TOOLS",
+            "OPENAI_COMPATIBLE_API_URL",
+            "OPENAI_COMPATIBLE_API_KEY",
+            "OPENAI_COMPATIBLE_MODEL",
+            "OPENAI_COMPATIBLE_STREAM",
+            "OPENAI_COMPATIBLE_PROVIDERS",
+            "SMART_SEARCH_VALIDATION_LEVEL",
+            "SMART_SEARCH_FALLBACK_MODE",
+            "SMART_SEARCH_MINIMUM_PROFILE",
+        } or cls._is_openai_compatible_numbered_key(key) or cls._is_openai_compatible_named_key(key)
+
+    def _resolved_openai_compatible_value(self, index: int, field: str, default: str | None = None) -> str | None:
+        value = self._get_config_value(f"OPENAI_COMPATIBLE_{index}_{field}")
+        if value is not None:
+            return value
+        if index == 1:
+            return self._get_config_value(f"OPENAI_COMPATIBLE_{field}", default)
+        return default
+
+    def _named_openai_compatible_value(self, provider_id: str, field: str, default: str | None = None) -> str | None:
+        provider_key = self._openai_compatible_provider_env_key(provider_id)
+        if not provider_key:
+            return default
+        return self._get_config_value(f"OPENAI_COMPATIBLE_{provider_key}_{field}", default)
+
+    def _openai_compatible_provider_ids(self) -> list[str]:
+        raw = self._get_config_value("OPENAI_COMPATIBLE_PROVIDERS", "") or ""
+        return self._normalize_openai_compatible_provider_ids_from_raw(raw)
+
+    def _openai_compatible_indices(self) -> list[int]:
+        indices: set[int] = set()
+        data = self._load_config_file()
+        for raw_key in [*os.environ.keys(), *data.keys()]:
+            parsed = self._parse_openai_compatible_numbered_key(str(raw_key).upper())
+            if parsed:
+                indices.add(parsed[0])
+        if any(
+            self._get_config_value(key) is not None
+            for key in (
+                "OPENAI_COMPATIBLE_API_URL",
+                "OPENAI_COMPATIBLE_API_KEY",
+                "OPENAI_COMPATIBLE_MODEL",
+                "OPENAI_COMPATIBLE_STREAM",
+            )
+        ):
+            indices.add(1)
+        return sorted(indices)
+
+    def _has_explicit_openai_compatible_numbered_value(self, index: int, field: str) -> bool:
+        key = f"OPENAI_COMPATIBLE_{index}_{field}"
+        if os.getenv(key) is not None:
+            return True
+        data = self._load_config_file()
+        return any(self._canonical_config_key(str(raw_key)) == key for raw_key in data)
+
+    def _all_config_keys(self) -> list[str]:
+        keys = set(self._CONFIG_KEYS)
+        data = self._load_config_file()
+        for raw_key in [*os.environ.keys(), *data.keys()]:
+            key = self._canonical_config_key(str(raw_key))
+            if self._is_openai_compatible_numbered_key(key):
+                keys.add(key)
+            if self._is_openai_compatible_named_key(key):
+                keys.add(key)
+        for provider_id in self._openai_compatible_provider_ids():
+            provider_key = self._openai_compatible_provider_env_key(provider_id)
+            if not provider_key:
+                continue
+            for field in self._OPENAI_COMPATIBLE_DYNAMIC_FIELDS:
+                keys.add(f"OPENAI_COMPATIBLE_{provider_key}_{field}")
+        for provider in self.openai_compatible_provider_configs():
+            env_prefix = str(provider.get("env_prefix") or "")
+            if env_prefix:
+                for field in self._OPENAI_COMPATIBLE_DYNAMIC_FIELDS:
+                    keys.add(f"{env_prefix}_{field}")
+                continue
+            index = provider["index"]
+            for field in self._OPENAI_COMPATIBLE_DYNAMIC_FIELDS:
+                keys.add(f"OPENAI_COMPATIBLE_{index}_{field}")
+        return sorted(keys)
 
     @staticmethod
     def _default_config_dir() -> Path:
@@ -161,12 +356,39 @@ class Config:
             hint = " (sandbox/CI 下可设 SMART_SEARCH_CONFIG_DIR 指向可写目录)" if isinstance(e, PermissionError) else ""
             raise ValueError(f"无法保存配置文件: {str(e)}{hint}")
 
+    def _normalized_config_data(self) -> dict[str, str]:
+        data = self._load_config_file()
+        normalized: dict[str, str] = {}
+        for old_key, new_key in self._LEGACY_CONFIG_KEYS.items():
+            if old_key in data and new_key not in data:
+                normalized[new_key] = str(data[old_key])
+        for key, value in data.items():
+            normalized_key = self._canonical_config_key(str(key))
+            if not self._is_supported_config_key(normalized_key) or value is None:
+                continue
+            normalized_value = str(value)
+            if normalized_key == "OPENAI_COMPATIBLE_PROVIDERS":
+                normalized_value = self._normalize_openai_compatible_provider_value(normalized_value)
+            normalized[normalized_key] = normalized_value
+        for field in self._OPENAI_COMPATIBLE_DYNAMIC_FIELDS:
+            legacy_key = f"OPENAI_COMPATIBLE_{field}"
+            numbered_key = f"OPENAI_COMPATIBLE_1_{field}"
+            if legacy_key in normalized and numbered_key not in normalized:
+                normalized[numbered_key] = normalized[legacy_key]
+        return normalized
+
     def _get_config_value(self, key: str, default: str | None = None) -> str | None:
+        key = self._canonical_config_key(key)
         env_value = os.getenv(key)
         if env_value is not None:
             return env_value
+        legacy_alias = self._legacy_openai_compatible_alias(key)
+        if legacy_alias:
+            legacy_env_value = os.getenv(legacy_alias)
+            if legacy_env_value is not None:
+                return legacy_env_value
 
-        data = self._load_config_file()
+        data = self._normalized_config_data()
         value = data.get(key)
         if value is None:
             legacy_key = next((old for old, new in self._LEGACY_CONFIG_KEYS.items() if new == key), None)
@@ -177,77 +399,61 @@ class Config:
         return str(value)
 
     def get_saved_config(self, masked: bool = True) -> dict:
-        data = self._load_config_file()
-        normalized: dict[str, str] = {}
-        for old_key, new_key in self._LEGACY_CONFIG_KEYS.items():
-            if old_key in data and new_key not in data:
-                normalized[new_key] = str(data[old_key])
-        for key, value in data.items():
-            if key in self._CONFIG_KEYS and value is not None:
-                normalized[key] = str(value)
+        normalized = self._normalized_config_data()
         if not masked:
             return normalized
         return {key: self._mask_if_secret(key, value) for key, value in normalized.items()}
 
     def get_config_source(self, key: str) -> str:
+        key = self._canonical_config_key(key)
         if os.getenv(key) is not None:
             return "environment"
-        data = self._load_config_file()
-        if key in data:
+        legacy_alias = self._legacy_openai_compatible_alias(key)
+        if legacy_alias and os.getenv(legacy_alias) is not None:
+            return "environment"
+        if key in self._normalized_config_data():
             return "config_file"
         legacy_key = next((old for old, new in self._LEGACY_CONFIG_KEYS.items() if new == key), None)
-        if legacy_key and legacy_key in data:
+        if legacy_key and legacy_key in self._load_config_file():
             return "config_file"
         return "default"
 
     def get_config_sources(self) -> dict[str, str]:
-        return {key: self.get_config_source(key) for key in sorted(self._CONFIG_KEYS)}
+        return {key: self.get_config_source(key) for key in self._all_config_keys()}
 
     def set_config_value(self, key: str, value: str) -> None:
-        key = key.strip().upper()
-        if key not in self._CONFIG_KEYS:
-            raise ValueError(f"Unsupported config key: {key}")
+        raw_key = key.strip().upper()
+        if not self._is_supported_config_key(raw_key):
+            raise ValueError(f"Unsupported config key: {raw_key}")
+        key = self._canonical_config_key(raw_key)
+        if key == "OPENAI_COMPATIBLE_PROVIDERS":
+            value = self._normalize_openai_compatible_provider_value(value)
         config_data = self._load_config_file()
+        for existing_key in list(config_data):
+            if self._canonical_config_key(str(existing_key)) == key and existing_key != key:
+                config_data.pop(existing_key, None)
         config_data[key] = value
         self._save_config_file(config_data)
-        if key in {
-            "XAI_API_URL",
-            "XAI_API_KEY",
-            "XAI_MODEL",
-            "XAI_TOOLS",
-            "OPENAI_COMPATIBLE_API_URL",
-            "OPENAI_COMPATIBLE_API_KEY",
-            "OPENAI_COMPATIBLE_MODEL",
-            "OPENAI_COMPATIBLE_STREAM",
-            "SMART_SEARCH_VALIDATION_LEVEL",
-            "SMART_SEARCH_FALLBACK_MODE",
-            "SMART_SEARCH_MINIMUM_PROFILE",
-        }:
+        if self._reset_model_cache_for_key(key):
             self._cached_model = None
 
     def unset_config_value(self, key: str) -> None:
-        key = key.strip().upper()
-        if key not in self._CONFIG_KEYS:
-            raise ValueError(f"Unsupported config key: {key}")
+        raw_key = key.strip().upper()
+        if not self._is_supported_config_key(raw_key):
+            raise ValueError(f"Unsupported config key: {raw_key}")
+        key = self._canonical_config_key(raw_key)
         config_data = self._load_config_file()
-        config_data.pop(key, None)
+        for existing_key in list(config_data):
+            if self._canonical_config_key(str(existing_key)) == key:
+                config_data.pop(existing_key, None)
+        legacy_alias = self._legacy_openai_compatible_alias(key)
+        if legacy_alias:
+            config_data.pop(legacy_alias, None)
         for old_key, new_key in self._LEGACY_CONFIG_KEYS.items():
             if new_key == key:
                 config_data.pop(old_key, None)
         self._save_config_file(config_data)
-        if key in {
-            "XAI_API_URL",
-            "XAI_API_KEY",
-            "XAI_MODEL",
-            "XAI_TOOLS",
-            "OPENAI_COMPATIBLE_API_URL",
-            "OPENAI_COMPATIBLE_API_KEY",
-            "OPENAI_COMPATIBLE_MODEL",
-            "OPENAI_COMPATIBLE_STREAM",
-            "SMART_SEARCH_VALIDATION_LEVEL",
-            "SMART_SEARCH_FALLBACK_MODE",
-            "SMART_SEARCH_MINIMUM_PROFILE",
-        }:
+        if self._reset_model_cache_for_key(key):
             self._cached_model = None
 
     def config_path_info(self) -> dict:
@@ -298,20 +504,100 @@ class Config:
 
     @property
     def openai_compatible_api_url(self) -> str | None:
-        return self._get_config_value("OPENAI_COMPATIBLE_API_URL")
+        provider_ids = self._openai_compatible_provider_ids()
+        if provider_ids:
+            return self._named_openai_compatible_value(provider_ids[0], "API_URL")
+        return self._resolved_openai_compatible_value(1, "API_URL")
 
     @property
     def openai_compatible_api_key(self) -> str | None:
-        return self._get_config_value("OPENAI_COMPATIBLE_API_KEY")
+        provider_ids = self._openai_compatible_provider_ids()
+        if provider_ids:
+            return self._named_openai_compatible_value(provider_ids[0], "API_KEY")
+        return self._resolved_openai_compatible_value(1, "API_KEY")
 
     @property
     def openai_compatible_model(self) -> str:
-        model = self._get_config_value("OPENAI_COMPATIBLE_MODEL") or self._base_model_value()
-        return self.apply_model_suffix_for_url(model, self.openai_compatible_api_url or "")
+        provider_ids = self._openai_compatible_provider_ids()
+        if provider_ids:
+            first_provider = provider_ids[0]
+            api_url = self._named_openai_compatible_value(first_provider, "API_URL") or ""
+            model = self._named_openai_compatible_value(first_provider, "MODEL")
+            model = model or self._get_config_value("OPENAI_COMPATIBLE_MODEL") or self._base_model_value()
+            return self.apply_model_suffix_for_url(model, api_url)
+        api_url = self.openai_compatible_api_url or ""
+        model = self._resolved_openai_compatible_value(1, "MODEL") or self._base_model_value()
+        return self.apply_model_suffix_for_url(model, api_url)
 
     @property
     def openai_compatible_stream(self) -> bool:
-        return (self._get_config_value("OPENAI_COMPATIBLE_STREAM", "false") or "false").lower() in ("true", "1", "yes")
+        provider_ids = self._openai_compatible_provider_ids()
+        if provider_ids:
+            inherited_stream = self._truthy(self._get_config_value("OPENAI_COMPATIBLE_STREAM", "false"), default=False)
+            stream_value = self._named_openai_compatible_value(provider_ids[0], "STREAM")
+            return inherited_stream if stream_value is None else self._truthy(stream_value, default=inherited_stream)
+        stream_value = self._get_config_value("OPENAI_COMPATIBLE_1_STREAM")
+        if stream_value is None:
+            stream_value = self._get_config_value("OPENAI_COMPATIBLE_STREAM", "false")
+        return self._truthy(stream_value, default=False)
+
+    def openai_compatible_provider_configs(self) -> list[dict[str, object]]:
+        providers: list[dict[str, object]] = []
+        base_model = self._get_config_value("OPENAI_COMPATIBLE_MODEL") or self._base_model_value()
+        inherited_stream = self._truthy(self._get_config_value("OPENAI_COMPATIBLE_STREAM", "false"), default=False)
+        provider_ids = self._openai_compatible_provider_ids()
+        if provider_ids:
+            for index, provider_id in enumerate(provider_ids, start=1):
+                provider_key = self._openai_compatible_provider_env_key(provider_id)
+                api_url = self._named_openai_compatible_value(provider_id, "API_URL")
+                api_key = self._named_openai_compatible_value(provider_id, "API_KEY")
+                if not api_url or not api_key:
+                    continue
+                model = self._named_openai_compatible_value(provider_id, "MODEL") or base_model
+                stream_value = self._named_openai_compatible_value(provider_id, "STREAM")
+                stream = inherited_stream if stream_value is None else self._truthy(stream_value, default=inherited_stream)
+                providers.append(
+                    {
+                        "index": index,
+                        "provider": f"openai-compatible:{provider_id}",
+                        "mode": "chat-completions",
+                        "api_url": api_url,
+                        "api_key": api_key,
+                        "model": self.apply_model_suffix_for_url(model, api_url),
+                        "stream": stream,
+                        "source": f"OPENAI_COMPATIBLE_{provider_key}_*",
+                        "env_prefix": f"OPENAI_COMPATIBLE_{provider_key}",
+                    }
+                )
+            if providers:
+                return providers
+        for index in self._openai_compatible_indices():
+            api_url = self._resolved_openai_compatible_value(index, "API_URL")
+            api_key = self._resolved_openai_compatible_value(index, "API_KEY")
+            if not api_url or not api_key:
+                continue
+            model = self._resolved_openai_compatible_value(index, "MODEL") or base_model
+            stream_value = self._get_config_value(f"OPENAI_COMPATIBLE_{index}_STREAM")
+            stream = inherited_stream if stream_value is None else self._truthy(stream_value, default=inherited_stream)
+            uses_legacy_keys = index == 1 and not any(
+                self._has_explicit_openai_compatible_numbered_value(index, field)
+                for field in self._OPENAI_COMPATIBLE_DYNAMIC_FIELDS
+            )
+            provider_name = "openai-compatible" if uses_legacy_keys else f"openai-compatible-{index}"
+            providers.append(
+                {
+                    "index": index,
+                    "provider": provider_name,
+                    "mode": "chat-completions",
+                    "api_url": api_url,
+                    "api_key": api_key,
+                    "model": self.apply_model_suffix_for_url(model, api_url),
+                    "stream": stream,
+                    "source": "OPENAI_COMPATIBLE_*" if uses_legacy_keys else f"OPENAI_COMPATIBLE_{index}_*",
+                    "env_prefix": f"OPENAI_COMPATIBLE_{index}",
+                }
+            )
+        return providers
 
     def parse_xai_tools(self, raw: str | None = None) -> list[str]:
         raw = raw or self.xai_tools_raw
@@ -500,10 +786,8 @@ class Config:
 
     def get_config_info(self) -> dict:
         config_parameter_errors: list[str] = []
-        explicit_main_configured = bool(
-            self.xai_api_key
-            or (self.openai_compatible_api_url and self.openai_compatible_api_key)
-        )
+        openai_provider_configs = self.openai_compatible_provider_configs()
+        explicit_main_configured = bool(self.xai_api_key or openai_provider_configs)
         if explicit_main_configured:
             config_status = "ok: 配置完整"
         else:
@@ -528,7 +812,7 @@ class Config:
         if config_parameter_errors and config_status.startswith("ok:"):
             config_status = f"config_error: {'; '.join(config_parameter_errors)}"
 
-        return {
+        info = {
             "XAI_API_URL": self.xai_api_url,
             "XAI_API_KEY": self._mask_api_key(self.xai_api_key) if self.xai_api_key else "未配置",
             "XAI_MODEL": self.xai_model,
@@ -537,6 +821,7 @@ class Config:
             "OPENAI_COMPATIBLE_API_KEY": self._mask_api_key(self.openai_compatible_api_key) if self.openai_compatible_api_key else "未配置",
             "OPENAI_COMPATIBLE_MODEL": self.openai_compatible_model,
             "OPENAI_COMPATIBLE_STREAM": self.openai_compatible_stream,
+            "OPENAI_COMPATIBLE_PROVIDERS": self._get_config_value("OPENAI_COMPATIBLE_PROVIDERS") or "",
             "SMART_SEARCH_VALIDATION_LEVEL": validation_level,
             "SMART_SEARCH_FALLBACK_MODE": fallback_mode,
             "SMART_SEARCH_MINIMUM_PROFILE": minimum_profile,
@@ -568,7 +853,7 @@ class Config:
             "ZHIPU_API_URL": self.zhipu_api_url,
             "ZHIPU_SEARCH_ENGINE": self.zhipu_search_engine,
             "ZHIPU_TIMEOUT_SECONDS": self.zhipu_timeout,
-            "primary_api_mode": "xai-responses" if self.xai_api_key else ("chat-completions" if self.openai_compatible_api_url and self.openai_compatible_api_key else "未配置"),
+            "primary_api_mode": "xai-responses" if self.xai_api_key else ("chat-completions" if openai_provider_configs else "未配置"),
             "primary_api_mode_source": "config_file" if explicit_main_configured else "default",
             "config_file": str(self.config_file),
             "config_dir": str(self.config_file.parent),
@@ -583,7 +868,14 @@ class Config:
             "file_logging_enabled": self.debug_enabled or self.log_to_file_enabled,
             "config_sources": self.get_config_sources(),
             "config_parameter_errors": config_parameter_errors,
-            "config_status": config_status
+            "config_status": config_status,
         }
+        for provider in openai_provider_configs:
+            env_prefix = str(provider.get("env_prefix") or f"OPENAI_COMPATIBLE_{provider['index']}")
+            info[f"{env_prefix}_API_URL"] = provider["api_url"]
+            info[f"{env_prefix}_API_KEY"] = self._mask_api_key(str(provider["api_key"])) if provider["api_key"] else "未配置"
+            info[f"{env_prefix}_MODEL"] = provider["model"]
+            info[f"{env_prefix}_STREAM"] = provider["stream"]
+        return info
 
 config = Config()

@@ -1,3 +1,4 @@
+from collections import defaultdict
 import json
 import asyncio
 from smart_search import cli
@@ -1172,6 +1173,245 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert "as-test-secret" not in out
 
 
+def test_setup_status_from_values_accepts_named_openai_compatible_pool():
+    status = cli._setup_status_from_values(
+        {
+            "OPENAI_COMPATIBLE_PROVIDERS": "grok-main,grok-backup",
+            "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+            "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-secret-1",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_API_URL": "https://relay2.example.com/v1",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY": "relay-secret-2",
+        }
+    )
+
+    assert status["main_search"]["configured"] == ["openai-compatible"]
+    assert status["main_search"]["fallback_chain"] == ["xai-responses", "openai-compatible"]
+    assert status["main_search"]["ok"] is True
+
+
+def test_setup_openai_compatible_provider_ids_deduplicates_env_key_collisions():
+    provider_ids = cli._setup_openai_compatible_provider_ids({"OPENAI_COMPATIBLE_PROVIDERS": "grok-main,grok_main"})
+
+    assert provider_ids == ["grok-main"]
+
+
+def test_setup_non_interactive_saves_named_openai_compatible_pool(monkeypatch, capsys):
+    saved = {}
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--openai-compatible-providers",
+        "grok-main,grok-backup",
+        "--openai-compatible-provider-api-url",
+        "grok-main=https://relay1.example.com/v1",
+        "--openai-compatible-provider-api-key",
+        "grok-main=relay-test-secret-1",
+        "--openai-compatible-provider-model",
+        "grok-main=relay-model-1",
+        "--openai-compatible-provider-api-url",
+        "grok-backup=https://relay2.example.com/v1",
+        "--openai-compatible-provider-api-key",
+        "grok-backup=relay-test-secret-2",
+        "--openai-compatible-provider-stream",
+        "grok-backup=false",
+    ])
+
+    out = capsys.readouterr().out
+    data = json.loads(out)
+
+    assert code == cli.EXIT_OK
+    assert saved == {
+        "OPENAI_COMPATIBLE_PROVIDERS": "grok-main,grok-backup",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-test-secret-1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_MODEL": "relay-model-1",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_API_URL": "https://relay2.example.com/v1",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY": "relay-test-secret-2",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_STREAM": "false",
+    }
+    assert set(data["saved"]) == set(saved)
+    assert "relay-test-secret-1" not in out
+    assert "relay-test-secret-2" not in out
+
+
+def test_setup_non_interactive_legacy_openai_compatible_clears_named_pool(monkeypatch, capsys):
+    saved = {}
+    cleared = []
+    current = {
+        "OPENAI_COMPATIBLE_PROVIDERS": "grok-main",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-old-secret",
+    }
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    def fake_config_unset(key):
+        cleared.append(key)
+        current.pop(key, None)
+        return {"ok": True, "key": key, "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_unset", fake_config_unset)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": current.copy()})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--openai-compatible-api-url",
+        "https://legacy.example.com/v1",
+        "--openai-compatible-api-key",
+        "legacy-secret-123",
+    ])
+
+    out = capsys.readouterr().out
+    data = json.loads(out)
+
+    assert code == cli.EXIT_OK
+    assert saved == {
+        "OPENAI_COMPATIBLE_API_URL": "https://legacy.example.com/v1",
+        "OPENAI_COMPATIBLE_API_KEY": "legacy-secret-123",
+    }
+    assert set(cleared) == {
+        "OPENAI_COMPATIBLE_PROVIDERS",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY",
+        "OPENAI_COMPATIBLE_GROK_MAIN_MODEL",
+        "OPENAI_COMPATIBLE_GROK_MAIN_STREAM",
+    }
+    assert set(data["saved"]) == set(saved)
+    assert "legacy-secret-123" not in out
+
+
+def test_setup_non_interactive_shared_openai_compatible_defaults_keep_named_pool(monkeypatch, capsys):
+    saved = {}
+    cleared = []
+    current = {
+        "OPENAI_COMPATIBLE_PROVIDERS": "grok-main",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-old-secret",
+    }
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    def fake_config_unset(key):
+        cleared.append(key)
+        current.pop(key, None)
+        return {"ok": True, "key": key, "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_unset", fake_config_unset)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": current.copy()})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--openai-compatible-model",
+        "shared-model-2",
+    ])
+
+    out = capsys.readouterr().out
+    data = json.loads(out)
+
+    assert code == cli.EXIT_OK
+    assert saved == {"OPENAI_COMPATIBLE_MODEL": "shared-model-2"}
+    assert cleared == []
+    assert set(data["saved"]) == set(saved)
+
+
+def test_prompt_main_search_accepts_named_openai_compatible_pool(monkeypatch):
+    values = {}
+    prompted = []
+    stream_answers = iter([True, False])
+
+    monkeypatch.setattr(cli, "_prompt_provider_multi_select", lambda *args, **kwargs: ["openai-compatible"])
+    monkeypatch.setattr(cli, "_setup_choice", lambda *args, **kwargs: "pool")
+
+    def fake_prompt_value(key, label, current="", optional=False, lang="en"):
+        prompted.append(key)
+        return {
+            "OPENAI_COMPATIBLE_PROVIDERS": "grok-main,grok-backup",
+            "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+            "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-test-secret-1",
+            "OPENAI_COMPATIBLE_GROK_MAIN_MODEL": "relay-model-1",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_API_URL": "https://relay2.example.com/v1",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY": "relay-test-secret-2",
+        }.get(key, "")
+
+    monkeypatch.setattr(cli, "_prompt_value", fake_prompt_value)
+    monkeypatch.setattr(cli, "_prompt_yes_no", lambda prompt, default=False: next(stream_answers))
+
+    cli._prompt_main_search(values, {}, "en")
+
+    assert prompted[:3] == [
+        "OPENAI_COMPATIBLE_PROVIDERS",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY",
+    ]
+    assert {key: value for key, value in values.items() if value} == {
+        "OPENAI_COMPATIBLE_PROVIDERS": "grok-main,grok-backup",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-test-secret-1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_MODEL": "relay-model-1",
+        "OPENAI_COMPATIBLE_GROK_MAIN_STREAM": "true",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_API_URL": "https://relay2.example.com/v1",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY": "relay-test-secret-2",
+    }
+
+
+
+def test_run_advanced_setup_prompts_accepts_named_openai_compatible_pool(monkeypatch):
+    values = defaultdict(str)
+    prompted = []
+
+    def fake_prompt_value(key, label, current="", optional=False, lang="en"):
+        prompted.append(key)
+        return {
+            "OPENAI_COMPATIBLE_PROVIDERS": "grok-main,grok-backup",
+            "OPENAI_COMPATIBLE_GROK_MAIN_API_URL": "https://relay1.example.com/v1",
+            "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY": "relay-test-secret-1",
+            "OPENAI_COMPATIBLE_GROK_MAIN_MODEL": "relay-model-1",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_API_URL": "https://relay2.example.com/v1",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY": "relay-test-secret-2",
+            "OPENAI_COMPATIBLE_GROK_BACKUP_STREAM": "false",
+        }.get(key, "")
+
+    monkeypatch.setattr(cli, "_prompt_value", fake_prompt_value)
+
+    cli._run_advanced_setup_prompts(values, {}, "en")
+
+    assert "OPENAI_COMPATIBLE_PROVIDERS" in prompted
+    for key in [
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_URL",
+        "OPENAI_COMPATIBLE_GROK_MAIN_API_KEY",
+        "OPENAI_COMPATIBLE_GROK_MAIN_MODEL",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_API_URL",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_STREAM",
+    ]:
+        assert key in prompted
+    assert values["OPENAI_COMPATIBLE_PROVIDERS"] == "grok-main,grok-backup"
+    assert values["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
+    assert values["OPENAI_COMPATIBLE_GROK_MAIN_API_KEY"] == "relay-test-secret-1"
+    assert values["OPENAI_COMPATIBLE_GROK_MAIN_MODEL"] == "relay-model-1"
+    assert values["OPENAI_COMPATIBLE_GROK_BACKUP_API_URL"] == "https://relay2.example.com/v1"
+    assert values["OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY"] == "relay-test-secret-2"
+    assert values["OPENAI_COMPATIBLE_GROK_BACKUP_STREAM"] == "false"
+
+
 def test_setup_non_interactive_rejects_legacy_flags(capsys):
     for flag, value in [
         ("--api-url", "https://api.example.com/v1"),
@@ -1557,7 +1797,7 @@ def test_setup_guided_masks_configured_url_defaults(monkeypatch, capsys):
         "OPENAI_COMPATIBLE_API_URL": "https://private-relay.example.com/v1",
         "OPENAI_COMPATIBLE_API_KEY": "relay-old-secret",
     }
-    answers = iter(["openai", "", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["openai", "", "", "", "", "skip", "skip", "n", "n"])
     secrets = iter([""])
 
     monkeypatch.setattr(cli.service, "config_set", lambda key, value: {"ok": True, "key": key, "value": "***"})
@@ -1576,7 +1816,7 @@ def test_setup_guided_masks_configured_url_defaults(monkeypatch, capsys):
 
 def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, capsys):
     saved = {}
-    answers = iter(["openai", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["openai", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
     secrets = iter(["relay-test-secret"])
 
     def fake_config_set(key, value):
@@ -1606,7 +1846,7 @@ def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, c
 
 def test_setup_guided_main_search_can_save_both_peer_providers(monkeypatch, capsys):
     saved = {}
-    answers = iter(["both", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["both", "", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
     secrets = iter(["xai-test-secret", "relay-test-secret"])
 
     def fake_config_set(key, value):

@@ -3,6 +3,7 @@ import asyncio
 import contextlib
 import getpass
 import json
+import re
 from importlib import metadata
 import subprocess
 import sys
@@ -900,6 +901,9 @@ def _t(lang: str, zh: str, en: str) -> str:
 
 
 def _display_provider(provider: str, lang: str) -> str:
+    if provider.startswith("openai-compatible:"):
+        provider_id = provider.split(":", 1)[1]
+        return f"OpenAI-compatible ({provider_id})"
     names = {
         "xai-responses": "xAI Responses",
         "openai-compatible": "OpenAI-compatible",
@@ -911,6 +915,73 @@ def _display_provider(provider: str, lang: str) -> str:
         "anysearch": "AnySearch",
     }
     return names.get(provider, provider)
+
+
+def _setup_openai_compatible_provider_ids(values: dict[str, str]) -> list[str]:
+    raw = str(values.get("OPENAI_COMPATIBLE_PROVIDERS") or "")
+    provider_ids: list[str] = []
+    seen_env_keys: set[str] = set()
+    for item in raw.split(","):
+        provider_id = re.sub(r"[^a-z0-9_-]+", "-", item.strip().lower()).strip("-_")
+        provider_env_key = _setup_openai_compatible_provider_env_key(provider_id)
+        if not provider_id or not provider_env_key or provider_env_key in seen_env_keys:
+            continue
+        seen_env_keys.add(provider_env_key)
+        provider_ids.append(provider_id)
+    return provider_ids
+
+
+def _setup_openai_compatible_provider_env_key(provider_id: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", provider_id.strip().upper()).strip("_")
+
+
+def _parse_openai_compatible_provider_assignment(raw: str, field: str) -> tuple[str, str, str]:
+    provider_text, separator, value = raw.partition("=")
+    provider_id = re.sub(r"[^a-z0-9_-]+", "-", provider_text.strip().lower()).strip("-_")
+    normalized_value = value.strip()
+    if not separator or not provider_id or not normalized_value:
+        raise ValueError(
+            f"Invalid --openai-compatible-provider-{field.lower().replace('_', '-')} value: {raw}. "
+            f"Expected <provider-id>=<value>."
+        )
+    env_key = _setup_openai_compatible_provider_env_key(provider_id)
+    return provider_id, f"OPENAI_COMPATIBLE_{env_key}_{field}", normalized_value
+
+
+def _collect_openai_compatible_provider_values(args: argparse.Namespace) -> dict[str, str]:
+    values: dict[str, str] = {}
+    provider_ids = _setup_openai_compatible_provider_ids({"OPENAI_COMPATIBLE_PROVIDERS": args.openai_compatible_providers})
+    seen = set(provider_ids)
+    for field, assignments in [
+        ("API_URL", args.openai_compatible_provider_api_url),
+        ("API_KEY", args.openai_compatible_provider_api_key),
+        ("MODEL", args.openai_compatible_provider_model),
+        ("STREAM", args.openai_compatible_provider_stream),
+    ]:
+        for assignment in assignments:
+            provider_id, key, value = _parse_openai_compatible_provider_assignment(assignment, field)
+            if provider_id not in seen:
+                seen.add(provider_id)
+                provider_ids.append(provider_id)
+            values[key] = value
+    if provider_ids:
+        values["OPENAI_COMPATIBLE_PROVIDERS"] = ",".join(provider_ids)
+    return values
+
+
+_SETUP_UNSET_SENTINEL = "__SMART_SEARCH_UNSET__"
+
+
+def _setup_openai_compatible_pool_keys(values: dict[str, str]) -> list[str]:
+    provider_ids = _setup_openai_compatible_provider_ids(values)
+    if not provider_ids:
+        return []
+    keys = ["OPENAI_COMPATIBLE_PROVIDERS"]
+    for provider_id in provider_ids:
+        env_key = _setup_openai_compatible_provider_env_key(provider_id)
+        for field in ("API_URL", "API_KEY", "MODEL", "STREAM"):
+            keys.append(f"OPENAI_COMPATIBLE_{env_key}_{field}")
+    return keys
 
 
 def _with_scheme(url: str) -> str:
@@ -977,6 +1048,11 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
         main_configured.add("xai-responses")
     if has("OPENAI_COMPATIBLE_API_URL") and has("OPENAI_COMPATIBLE_API_KEY"):
         main_configured.add("openai-compatible")
+    for provider_id in _setup_openai_compatible_provider_ids(values):
+        provider_key = _setup_openai_compatible_provider_env_key(provider_id)
+        if has(f"OPENAI_COMPATIBLE_{provider_key}_API_URL") and has(f"OPENAI_COMPATIBLE_{provider_key}_API_KEY"):
+            main_configured.add("openai-compatible")
+            break
 
     status = {
         "main_search": {
@@ -1030,8 +1106,18 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
 
 def _merge_setup_values(current: dict[str, str], values: dict[str, str]) -> dict[str, str]:
     merged = dict(current)
-    merged.update({key: value for key, value in values.items() if value})
+    for key, value in values.items():
+        if value == _SETUP_UNSET_SENTINEL:
+            merged.pop(key, None)
+        elif value:
+            merged[key] = value
     return merged
+
+
+def _mark_openai_compatible_pool_for_unset(values: dict[str, str], current: dict[str, str]) -> None:
+    snapshot = _merge_setup_values(current, values)
+    for key in _setup_openai_compatible_pool_keys(snapshot):
+        values[key] = _SETUP_UNSET_SENTINEL
 
 
 def _write_setup_status(status: dict[str, Any], lang: str, *, final: bool = False) -> None:
@@ -1277,6 +1363,125 @@ def _setup_choice(prompt: str, choices: set[str], default: str) -> str:
     return value if value in choices else default
 
 
+def _setup_current_value(current: dict[str, str], values: dict[str, str], key: str) -> str:
+    return str(_merge_setup_values(current, values).get(key) or "")
+
+
+def _prompt_openai_compatible_legacy_values(values: dict[str, str], current: dict[str, str], lang: str) -> None:
+    values["OPENAI_COMPATIBLE_API_URL"] = _prompt_value(
+        "OPENAI_COMPATIBLE_API_URL",
+        _t(
+            lang,
+            "OpenAI-compatible API 地址（示例: https://api.openai.com/v1）",
+            "OpenAI-compatible API URL (example: https://api.openai.com/v1)",
+        ),
+        _setup_current_value(current, values, "OPENAI_COMPATIBLE_API_URL"),
+        lang=lang,
+    )
+    values["OPENAI_COMPATIBLE_API_KEY"] = _prompt_value(
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OpenAI-compatible API key",
+        _setup_current_value(current, values, "OPENAI_COMPATIBLE_API_KEY"),
+        lang=lang,
+    )
+    values["OPENAI_COMPATIBLE_MODEL"] = _prompt_value(
+        "OPENAI_COMPATIBLE_MODEL",
+        _t(lang, "OpenAI-compatible 模型", "OpenAI-compatible model"),
+        _setup_current_value(current, values, "OPENAI_COMPATIBLE_MODEL"),
+        optional=True,
+        lang=lang,
+    )
+    stream_default = _setup_current_value(current, values, "OPENAI_COMPATIBLE_STREAM")
+    if _prompt_yes_no(
+        _t(
+            lang,
+            f"是否启用 OpenAI-compatible stream=true？用于部分中转长请求兼容 [{stream_default or 'false'}]: ",
+            f"Enable OpenAI-compatible stream=true for relay long-request compatibility [{stream_default or 'false'}]: ",
+        ),
+        default=(str(stream_default).lower() in {"true", "1", "yes"}),
+    ):
+        values["OPENAI_COMPATIBLE_STREAM"] = "true"
+    elif stream_default:
+        values["OPENAI_COMPATIBLE_STREAM"] = "false"
+
+
+def _prompt_openai_compatible_named_provider_pool(values: dict[str, str], current: dict[str, str], lang: str) -> None:
+    providers_raw = _prompt_value(
+        "OPENAI_COMPATIBLE_PROVIDERS",
+        _t(
+            lang,
+            "OpenAI-compatible provider 顺序池（逗号分隔 ID）",
+            "OpenAI-compatible provider pool (comma-separated IDs)",
+        ),
+        _setup_current_value(current, values, "OPENAI_COMPATIBLE_PROVIDERS"),
+        lang=lang,
+    )
+    provider_ids = _setup_openai_compatible_provider_ids({"OPENAI_COMPATIBLE_PROVIDERS": providers_raw})
+    values["OPENAI_COMPATIBLE_PROVIDERS"] = ",".join(provider_ids)
+    for provider_id in provider_ids:
+        provider_key = _setup_openai_compatible_provider_env_key(provider_id)
+        prefix = f"OPENAI_COMPATIBLE_{provider_key}"
+        values[f"{prefix}_API_URL"] = _prompt_value(
+            f"{prefix}_API_URL",
+            _t(
+                lang,
+                f"OpenAI-compatible {provider_id} API 地址（示例: https://api.openai.com/v1）",
+                f"OpenAI-compatible {provider_id} API URL (example: https://api.openai.com/v1)",
+            ),
+            _setup_current_value(current, values, f"{prefix}_API_URL"),
+            lang=lang,
+        )
+        values[f"{prefix}_API_KEY"] = _prompt_value(
+            f"{prefix}_API_KEY",
+            f"OpenAI-compatible {provider_id} API key",
+            _setup_current_value(current, values, f"{prefix}_API_KEY"),
+            lang=lang,
+        )
+        values[f"{prefix}_MODEL"] = _prompt_value(
+            f"{prefix}_MODEL",
+            _t(lang, f"OpenAI-compatible {provider_id} 模型", f"OpenAI-compatible {provider_id} model"),
+            _setup_current_value(current, values, f"{prefix}_MODEL"),
+            optional=True,
+            lang=lang,
+        )
+        stream_key = f"{prefix}_STREAM"
+        stream_default = _setup_current_value(current, values, stream_key)
+        if _prompt_yes_no(
+            _t(
+                lang,
+                f"是否启用 OpenAI-compatible {provider_id} stream=true？用于部分中转长请求兼容 [{stream_default or 'false'}]: ",
+                f"Enable OpenAI-compatible {provider_id} stream=true for relay long-request compatibility [{stream_default or 'false'}]: ",
+            ),
+            default=(str(stream_default).lower() in {"true", "1", "yes"}),
+        ):
+            values[stream_key] = "true"
+        elif stream_default:
+            values[stream_key] = "false"
+
+
+def _prompt_openai_compatible_named_provider_pool_advanced(
+    values: dict[str, str],
+    current: dict[str, str],
+    lang: str,
+) -> None:
+    provider_ids = _setup_openai_compatible_provider_ids(
+        {"OPENAI_COMPATIBLE_PROVIDERS": _setup_current_value(current, values, "OPENAI_COMPATIBLE_PROVIDERS")}
+    )
+    for provider_id in provider_ids:
+        provider_key = _setup_openai_compatible_provider_env_key(provider_id)
+        prefix = f"OPENAI_COMPATIBLE_{provider_key}"
+        prompts = [
+            (f"{prefix}_API_URL", f"OpenAI-compatible {provider_id} API URL"),
+            (f"{prefix}_API_KEY", f"OpenAI-compatible {provider_id} API key"),
+            (f"{prefix}_MODEL", f"OpenAI-compatible {provider_id} model"),
+            (f"{prefix}_STREAM", f"OpenAI-compatible {provider_id} stream mode (true/false)"),
+        ]
+        for key, label in prompts:
+            if values.get(key):
+                continue
+            values[key] = _prompt_value(key, label, _setup_current_value(current, values, key), optional=True, lang=lang)
+
+
 def _prompt_main_search(values: dict[str, str], current: dict[str, str], lang: str) -> None:
     status = _setup_status_from_values(_merge_setup_values(current, values))
     configured = status["main_search"]["configured"]
@@ -1308,41 +1513,21 @@ def _prompt_main_search(values: dict[str, str], current: dict[str, str], lang: s
             lang=lang,
         )
     if "openai-compatible" in selected:
-        values["OPENAI_COMPATIBLE_API_URL"] = _prompt_value(
-            "OPENAI_COMPATIBLE_API_URL",
+        default_mode = "pool" if _setup_openai_compatible_provider_ids(_merge_setup_values(current, values)) else "legacy"
+        mode = _setup_choice(
             _t(
                 lang,
-                "OpenAI-compatible API 地址（示例: https://api.openai.com/v1）",
-                "OpenAI-compatible API URL (example: https://api.openai.com/v1)",
+                f"OpenAI-compatible 配置模式 [legacy/pool] ({default_mode}): ",
+                f"OpenAI-compatible mode [legacy/pool] ({default_mode}): ",
             ),
-            current.get("OPENAI_COMPATIBLE_API_URL", ""),
-            lang=lang,
+            {"legacy", "pool"},
+            default_mode,
         )
-        values["OPENAI_COMPATIBLE_API_KEY"] = _prompt_value(
-            "OPENAI_COMPATIBLE_API_KEY",
-            "OpenAI-compatible API key",
-            current.get("OPENAI_COMPATIBLE_API_KEY", ""),
-            lang=lang,
-        )
-        values["OPENAI_COMPATIBLE_MODEL"] = _prompt_value(
-            "OPENAI_COMPATIBLE_MODEL",
-            _t(lang, "OpenAI-compatible 模型", "OpenAI-compatible model"),
-            current.get("OPENAI_COMPATIBLE_MODEL", ""),
-            optional=True,
-            lang=lang,
-        )
-        stream_default = current.get("OPENAI_COMPATIBLE_STREAM", "")
-        if _prompt_yes_no(
-            _t(
-                lang,
-                f"是否启用 OpenAI-compatible stream=true？用于部分中转长请求兼容 [{stream_default or 'false'}]: ",
-                f"Enable OpenAI-compatible stream=true for relay long-request compatibility [{stream_default or 'false'}]: ",
-            ),
-            default=(str(stream_default).lower() in {"true", "1", "yes"}),
-        ):
-            values["OPENAI_COMPATIBLE_STREAM"] = "true"
-        elif stream_default:
-            values["OPENAI_COMPATIBLE_STREAM"] = "false"
+        if mode == "pool":
+            _prompt_openai_compatible_named_provider_pool(values, current, lang)
+        else:
+            _mark_openai_compatible_pool_for_unset(values, current)
+            _prompt_openai_compatible_legacy_values(values, current, lang)
 
 
 def _prompt_docs_search(values: dict[str, str], current: dict[str, str], lang: str) -> None:
@@ -1702,6 +1887,7 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("OPENAI_COMPATIBLE_API_KEY", "OpenAI-compatible API key", True),
         ("OPENAI_COMPATIBLE_MODEL", "OpenAI-compatible model", True),
         ("OPENAI_COMPATIBLE_STREAM", "OpenAI-compatible stream mode (true/false)", True),
+        ("OPENAI_COMPATIBLE_PROVIDERS", "OpenAI-compatible provider pool (comma-separated IDs)", True),
         ("SMART_SEARCH_VALIDATION_LEVEL", "Validation level (fast/balanced/strict)", True),
         ("SMART_SEARCH_FALLBACK_MODE", "Fallback mode (auto/off)", True),
         ("SMART_SEARCH_MINIMUM_PROFILE", "Minimum profile (standard/off)", True),
@@ -1729,6 +1915,7 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         elif key == "ZHIPU_API_URL":
             value = _normalize_zhipu_api_url(value)
         values[key] = value
+    _prompt_openai_compatible_named_provider_pool_advanced(values, current, lang)
 
 
 async def _run_async(args: argparse.Namespace) -> int:
@@ -1857,7 +2044,8 @@ def _run_config(args: argparse.Namespace) -> int:
 def _run_setup(args: argparse.Namespace) -> int:
     try:
         explicit_skill_targets = parse_skill_targets(args.install_skills) if args.install_skills else []
-    except SkillInstallError as e:
+        openai_compatible_provider_values = _collect_openai_compatible_provider_values(args)
+    except (SkillInstallError, ValueError) as e:
         data = {"ok": False, "error_type": "parameter_error", "error": str(e), "config_file": service.config_path()["config_file"]}
         return _print_result("setup", data, args.format, args.output)
 
@@ -1870,6 +2058,7 @@ def _run_setup(args: argparse.Namespace) -> int:
         "OPENAI_COMPATIBLE_API_KEY": args.openai_compatible_api_key,
         "OPENAI_COMPATIBLE_MODEL": args.openai_compatible_model,
         "OPENAI_COMPATIBLE_STREAM": args.openai_compatible_stream,
+        "OPENAI_COMPATIBLE_PROVIDERS": args.openai_compatible_providers,
         "SMART_SEARCH_VALIDATION_LEVEL": args.validation_level,
         "SMART_SEARCH_FALLBACK_MODE": args.fallback_mode,
         "SMART_SEARCH_MINIMUM_PROFILE": args.minimum_profile,
@@ -1886,12 +2075,18 @@ def _run_setup(args: argparse.Namespace) -> int:
         "ANYSEARCH_API_KEY": args.anysearch_key,
         "ANYSEARCH_TIMEOUT_SECONDS": args.anysearch_timeout,
     }
+    values.update(openai_compatible_provider_values)
 
     lang = args.lang if args.lang in {"zh", "en"} else "zh"
     selected_skill_targets: list[str] = list(explicit_skill_targets)
+    current = service.config_list(show_secrets=True)["values"]
+
+    if args.non_interactive and not openai_compatible_provider_values and any(
+        values.get(key) for key in ("OPENAI_COMPATIBLE_API_URL", "OPENAI_COMPATIBLE_API_KEY")
+    ):
+        _mark_openai_compatible_pool_for_unset(values, current)
 
     if not args.non_interactive:
-        current = service.config_list(show_secrets=True)["values"]
         _write_setup_banner(args.lang if args.lang in {"zh", "en"} else "zh")
         lang = _select_setup_language(args.lang)
         if args.advanced:
@@ -1902,7 +2097,9 @@ def _run_setup(args: argparse.Namespace) -> int:
 
     saved: dict[str, str] = {}
     for key, value in values.items():
-        if value:
+        if value == _SETUP_UNSET_SENTINEL:
+            service.config_unset(key)
+        elif value:
             result = service.config_set(key, value)
             saved[key] = result.get("value", "")
 
@@ -2175,6 +2372,35 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--openai-compatible-api-key", default="", help="Save OPENAI_COMPATIBLE_API_KEY.")
     setup_parser.add_argument("--openai-compatible-model", default="", help="Save OPENAI_COMPATIBLE_MODEL.")
     setup_parser.add_argument("--openai-compatible-stream", default="", help="Save OPENAI_COMPATIBLE_STREAM.")
+    setup_parser.add_argument(
+        "--openai-compatible-providers",
+        default="",
+        help="Save OPENAI_COMPATIBLE_PROVIDERS as a comma-separated ordered pool.",
+    )
+    setup_parser.add_argument(
+        "--openai-compatible-provider-api-url",
+        action="append",
+        default=[],
+        help="Save a named OPENAI_COMPATIBLE_<ID>_API_URL using <provider-id>=<url>.",
+    )
+    setup_parser.add_argument(
+        "--openai-compatible-provider-api-key",
+        action="append",
+        default=[],
+        help="Save a named OPENAI_COMPATIBLE_<ID>_API_KEY using <provider-id>=<api-key>.",
+    )
+    setup_parser.add_argument(
+        "--openai-compatible-provider-model",
+        action="append",
+        default=[],
+        help="Save a named OPENAI_COMPATIBLE_<ID>_MODEL using <provider-id>=<model>.",
+    )
+    setup_parser.add_argument(
+        "--openai-compatible-provider-stream",
+        action="append",
+        default=[],
+        help="Save a named OPENAI_COMPATIBLE_<ID>_STREAM using <provider-id>=<true|false>.",
+    )
     setup_parser.add_argument("--validation-level", default="", help="Save SMART_SEARCH_VALIDATION_LEVEL.")
     setup_parser.add_argument("--fallback-mode", default="", help="Save SMART_SEARCH_FALLBACK_MODE.")
     setup_parser.add_argument("--minimum-profile", default="", help="Save SMART_SEARCH_MINIMUM_PROFILE.")

@@ -142,6 +142,22 @@ MAIN_SEARCH_PROVIDER_ALIASES = {
 }
 
 
+def _main_search_provider_aliases(provider_id: str) -> set[str]:
+    if provider_id.startswith("openai-compatible:"):
+        pool_id = provider_id.split(":", 1)[1]
+        aliases = set(MAIN_SEARCH_PROVIDER_ALIASES["openai-compatible"]) | {provider_id, pool_id}
+        aliases.add(pool_id.replace("-", "_"))
+        aliases.add(pool_id.replace("_", "-"))
+        return aliases
+    if provider_id.startswith("openai-compatible-"):
+        return set(MAIN_SEARCH_PROVIDER_ALIASES["openai-compatible"]) | {provider_id}
+    return MAIN_SEARCH_PROVIDER_ALIASES.get(provider_id, {provider_id})
+
+
+def _main_search_fallback_chain() -> list[str]:
+    return ["xai-responses", *[str(item["provider"]) for item in config.openai_compatible_provider_configs()]]
+
+
 def _elapsed_ms(start: float) -> float:
     return round((time.time() - start) * 1000, 2)
 
@@ -596,7 +612,7 @@ def get_capability_status() -> dict[str, Any]:
     status = {
         "main_search": {
             "configured": main_configured,
-            "fallback_chain": MAIN_SEARCH_FALLBACK_CHAIN,
+            "fallback_chain": _main_search_fallback_chain(),
             "ok": bool(main_configured),
         },
         "web_search": {
@@ -675,7 +691,7 @@ def _parse_provider_filter(providers: str = "auto") -> set[str] | None:
 def _provider_allowed(provider_id: str, provider_filter: set[str] | None) -> bool:
     if provider_filter is None:
         return True
-    aliases = MAIN_SEARCH_PROVIDER_ALIASES.get(provider_id, {provider_id})
+    aliases = _main_search_provider_aliases(provider_id)
     return bool(provider_filter.intersection(aliases))
 
 
@@ -684,10 +700,9 @@ def _configured_main_search_provider_ids() -> list[str]:
 
     if config.xai_api_key:
         configured.add("xai-responses")
-    if config.openai_compatible_api_url and config.openai_compatible_api_key:
-        configured.add("openai-compatible")
+    configured.update(str(item["provider"]) for item in config.openai_compatible_provider_configs())
 
-    return [provider for provider in MAIN_SEARCH_FALLBACK_CHAIN if provider in configured]
+    return [provider for provider in _main_search_fallback_chain() if provider in configured]
 
 
 def _main_search_provider_configs(model_override: str = "", providers: str = "auto") -> list[dict[str, Any]]:
@@ -701,25 +716,30 @@ def _main_search_provider_configs(model_override: str = "", providers: str = "au
             "api_url": config.xai_api_url,
             "api_key": config.xai_api_key,
             "model": model_override or config.xai_model,
-            "tools": config.parse_xai_tools(config.xai_tools_raw),
+            "tools": config.parse_xai_tools(),
             "source": "XAI_*",
         }
 
-    if config.openai_compatible_api_url and config.openai_compatible_api_key:
-        by_provider["openai-compatible"] = {
-            "provider": "openai-compatible",
+    for provider in config.openai_compatible_provider_configs():
+        provider_id = str(provider["provider"])
+        api_url = str(provider["api_url"])
+        resolved_model = model_override or str(provider["model"])
+        if model_override:
+            resolved_model = config.apply_model_suffix_for_url(model_override, api_url)
+        by_provider[provider_id] = {
+            "provider": provider_id,
             "mode": "chat-completions",
-            "api_url": config.openai_compatible_api_url,
-            "api_key": config.openai_compatible_api_key,
-            "model": model_override or config.openai_compatible_model,
-            "stream": config.openai_compatible_stream,
+            "api_url": api_url,
+            "api_key": str(provider["api_key"]),
+            "model": resolved_model,
+            "stream": bool(provider["stream"]),
             "tools": [],
-            "source": "OPENAI_COMPATIBLE_*",
+            "source": provider["source"],
         }
 
     return [
         by_provider[provider]
-        for provider in MAIN_SEARCH_FALLBACK_CHAIN
+        for provider in _main_search_fallback_chain()
         if provider in by_provider and _provider_allowed(provider, provider_filter)
     ]
 
@@ -1163,7 +1183,7 @@ async def search(
     primary_api_mode = main_provider_configs[0]["mode"]
     if stream is not None:
         for provider_config in main_provider_configs:
-            if provider_config["provider"] == "openai-compatible":
+            if str(provider_config["provider"]).startswith("openai-compatible"):
                 provider_config["stream"] = stream
 
     has_tavily = bool(config.tavily_api_key)
@@ -1201,7 +1221,10 @@ async def search(
         "fallback_mode": fallback_mode,
         "providers": providers,
         "main_search_chain": [item["provider"] for item in selected_main_provider_configs],
-        "openai_compatible_stream": next((bool(item.get("stream")) for item in selected_main_provider_configs if item["provider"] == "openai-compatible"), False),
+        "openai_compatible_stream": next(
+            (bool(item.get("stream")) for item in selected_main_provider_configs if str(item["provider"]).startswith("openai-compatible")),
+            False,
+        ),
     }
 
     provider_attempts: list[dict] = []
@@ -1928,6 +1951,7 @@ def config_list(show_secrets: bool = False) -> dict[str, Any]:
 
 
 def config_set(key: str, value: str) -> dict[str, Any]:
+    normalized_key = config.normalize_config_key(key)
     try:
         config.set_config_value(key, value)
     except ValueError as e:
@@ -1936,17 +1960,18 @@ def config_set(key: str, value: str) -> dict[str, Any]:
     return {
         "ok": True,
         "config_file": str(config.config_file),
-        "key": key.strip().upper(),
-        "value": saved.get(key.strip().upper(), ""),
+        "key": normalized_key,
+        "value": saved.get(normalized_key, ""),
     }
 
 
 def config_unset(key: str) -> dict[str, Any]:
+    normalized_key = config.normalize_config_key(key)
     try:
         config.unset_config_value(key)
     except ValueError as e:
-        return {"ok": False, "error_type": "parameter_error", "error": str(e), "config_file": str(config.config_file), "key": key.strip().upper()}
-    return {"ok": True, "config_file": str(config.config_file), "key": key.strip().upper()}
+        return {"ok": False, "error_type": "parameter_error", "error": str(e), "config_file": str(config.config_file), "key": normalized_key}
+    return {"ok": True, "config_file": str(config.config_file), "key": normalized_key}
 
 
 async def smoke(mode: str = "mock") -> dict[str, Any]:

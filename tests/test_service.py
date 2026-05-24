@@ -1,4 +1,5 @@
 import json
+import os
 
 import httpx
 import pytest
@@ -10,15 +11,14 @@ def _reset_config(monkeypatch, tmp_path):
     fake_config_file = tmp_path / "config.json"
     monkeypatch.setattr(service.config, "_config_file", fake_config_file)
     monkeypatch.setattr(service.config, "_cached_model", None)
+    for key in list(os.environ):
+        if key.startswith("OPENAI_COMPATIBLE_"):
+            monkeypatch.delenv(key, raising=False)
     for key in [
         "XAI_API_URL",
         "XAI_API_KEY",
         "XAI_MODEL",
         "XAI_TOOLS",
-        "OPENAI_COMPATIBLE_API_URL",
-        "OPENAI_COMPATIBLE_API_KEY",
-        "OPENAI_COMPATIBLE_MODEL",
-        "OPENAI_COMPATIBLE_STREAM",
         "EXA_API_KEY",
         "EXA_BASE_URL",
         "ANYSEARCH_API_KEY",
@@ -102,6 +102,100 @@ def test_openai_compatible_stream_config_defaults_and_boolean_styles(monkeypatch
 
     monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "false")
     assert service.config.openai_compatible_stream is False
+
+
+def test_legacy_openai_compatible_config_keeps_single_provider_behavior(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "relay-model-1")
+
+    configs = service._main_search_provider_configs()
+
+    assert service._configured_main_search_provider_ids() == ["openai-compatible"]
+    assert service.get_capability_status()["main_search"]["configured"] == ["openai-compatible"]
+    assert [item["provider"] for item in configs] == ["openai-compatible"]
+
+
+def test_named_openai_compatible_pool_configs_expand_ids_in_order(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok_backup")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
+
+    configs = service._main_search_provider_configs()
+
+    assert [item["provider"] for item in configs] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok_backup",
+    ]
+    assert [item["api_url"] for item in configs] == [
+        "https://relay1.example.com/v1",
+        "https://relay2.example.com/v1",
+    ]
+    assert [item["model"] for item in configs] == ["relay-model-1", "shared-model"]
+    assert [item["stream"] for item in configs] == [True, False]
+    assert [item["source"] for item in configs] == [
+        "OPENAI_COMPATIBLE_GROK_MAIN_*",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_*",
+    ]
+
+
+def test_incomplete_named_openai_compatible_pool_falls_back_to_legacy_provider(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://legacy.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "legacysecret123")
+
+    configs = service._main_search_provider_configs()
+
+    assert [item["provider"] for item in configs] == ["openai-compatible"]
+    assert configs[0]["api_url"] == "https://legacy.example.com/v1"
+
+
+def test_named_openai_compatible_pool_keys_round_trip_in_config_list(monkeypatch, tmp_path):
+    fake_config_file = _reset_config(monkeypatch, tmp_path)
+
+    service.config_set("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
+    service.config_set("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    service.config_set("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+
+    listed = service.config_list()
+
+    assert listed["config_file"] == str(fake_config_file)
+    assert listed["values"]["OPENAI_COMPATIBLE_PROVIDERS"] == "grok-main"
+    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
+    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_KEY"] == "abcd****WXYZ"
+
+
+def test_named_openai_compatible_hyphenated_keys_are_normalized_on_save(monkeypatch, tmp_path):
+    fake_config_file = _reset_config(monkeypatch, tmp_path)
+
+    service.config_set("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
+    set_result = service.config_set("OPENAI_COMPATIBLE_GROK-MAIN_API_URL", "https://relay1.example.com/v1")
+    service.config_set("OPENAI_COMPATIBLE_GROK-MAIN_API_KEY", "abcd1234WXYZ")
+
+    listed = service.config_list()
+    configs = service._main_search_provider_configs()
+
+    assert set_result["ok"] is True
+    assert set_result["config_file"] == str(fake_config_file)
+    assert set_result["key"] == "OPENAI_COMPATIBLE_GROK_MAIN_API_URL"
+    assert set_result["value"] == "https://relay1.example.com/v1"
+    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
+    assert "OPENAI_COMPATIBLE_GROK-MAIN_API_URL" not in listed["values"]
+    assert service.config.openai_compatible_api_url == "https://relay1.example.com/v1"
+    assert [item["provider"] for item in configs] == ["openai-compatible:grok-main"]
 
 
 def test_anysearch_config_defaults_and_saved_values(monkeypatch, tmp_path):
@@ -521,6 +615,50 @@ async def test_search_provider_filter_can_select_openai_compatible(monkeypatch):
     assert result["ok"] is True
     assert result["routing_decision"]["main_search_chain"] == ["openai-compatible"]
     assert [a["provider"] for a in result["provider_attempts"]] == ["OpenAI-compatible"]
+
+
+@pytest.mark.asyncio
+async def test_search_falls_through_openai_compatible_pool_in_order(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok-backup")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
+    captured = []
+
+    async def pooled_openai(self, query, platform="", ctx=None):
+        captured.append((self.api_url, self.api_key, self.model, self.stream))
+        if self.api_url == "https://relay1.example.com/v1":
+            request = httpx.Request("POST", f"{self.api_url}/chat/completions")
+            response = httpx.Response(503, text="relay1 unavailable", request=request)
+            raise httpx.HTTPStatusError("relay1 unavailable", request=request, response=response)
+        return 'Fallback answer.\n\nsources([{"url":"https://fallback.example.com","title":"Fallback"}])'
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", pooled_openai)
+
+    result = await service.search("what is example")
+
+    assert result["ok"] is True
+    assert result["content"] == "Fallback answer."
+    assert result["fallback_used"] is True
+    assert result["routing_decision"]["main_search_chain"] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok-backup",
+    ]
+    assert result["capability_status"]["main_search"]["configured"] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok-backup",
+    ]
+    assert captured == [
+        ("https://relay1.example.com/v1", "abcd1234WXYZ", "relay-model-1", True),
+        ("https://relay2.example.com/v1", "pqrs5678LMNO", "shared-model", False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1222,6 +1360,49 @@ async def test_doctor_tests_main_providers_independently(monkeypatch):
     assert result["primary_connection_test"]["status"] == "timeout"
     assert result["main_search_connection_tests"]["xai-responses"]["status"] == "timeout"
     assert result["main_search_connection_tests"]["openai-compatible"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_doctor_masks_pooled_openai_compatible_keys_and_reports_each_provider(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok-backup")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
+
+    async def fake_main_connection(provider_config):
+        return {
+            "status": "ok",
+            "message": f"{provider_config['provider']} ok",
+            "response_time_ms": 12.3,
+            "available_models": [provider_config["model"]],
+            "chat_completion_test": {"status": "ok", "message": "chat ok", "response_time_ms": 10.0},
+            "models_endpoint_test": {"status": "ok", "message": "models ok", "response_time_ms": 2.3},
+        }
+
+    monkeypatch.setattr(service, "_safe_test_main_provider_connection", fake_main_connection)
+
+    result = await service.doctor()
+
+    assert result["OPENAI_COMPATIBLE_PROVIDERS"] == "grok-main,grok-backup"
+    assert result["OPENAI_COMPATIBLE_GROK_MAIN_API_KEY"] == "abcd****WXYZ"
+    assert result["OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY"] == "pqrs****LMNO"
+    assert "abcd1234WXYZ" not in json.dumps(result)
+    assert "pqrs5678LMNO" not in json.dumps(result)
+    assert list(result["main_search_connection_tests"]) == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok-backup",
+    ]
+    assert result["main_search_connection_tests"]["openai-compatible:grok-main"]["available_models"] == ["relay-model-1"]
+    assert result["main_search_connection_tests"]["openai-compatible:grok-backup"]["chat_completion_test"]["status"] == "ok"
+    assert result["capability_status"]["main_search"]["configured"] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok-backup",
+    ]
 
 
 @pytest.mark.asyncio
