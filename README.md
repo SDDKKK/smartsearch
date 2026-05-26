@@ -5,15 +5,10 @@
 CLI-first, skill-driven web research for AI agents and terminal users. `smart-search` gives AI tools one reproducible command layer for live search, source discovery, page fetching, site mapping, provider diagnostics, and offline Deep Research planning.
 
 <p>
-  <a href="https://linux.do">
-    <img src="https://img.shields.io/badge/LinuxDo-community-1f6feb" alt="LinuxDo">
-  </a>
   <a href="https://www.npmjs.com/package/@konbakuyomu/smart-search">
     <img src="https://img.shields.io/npm/v/@konbakuyomu/smart-search?label=npm%20latest" alt="npm latest">
   </a>
 </p>
-
-Thanks to the [LinuxDo](https://linux.do) community for the discussions that shaped the CLI + Skills workflow.
 
 ![Star History Chart](https://api.star-history.com/svg?repos=konbakuyomu/smartsearch&type=Date)
 
@@ -97,12 +92,23 @@ Skill installation writes the bundled `smart-search-cli` skill into user-level t
 `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills`, and `~/.hermes/skills`. It does not initialize
 Trellis, hooks, agents, or commands. `--skills-root PATH` is only an advanced override for portable or test installs.
 
+6. After upgrading the CLI, refresh the installed global skill:
+
+```powershell
+smart-search skills status --targets codex --format json
+smart-search skills update --targets codex --format json
+```
+
+`setup --install-skills` remains available for first-time setup. For routine synchronization after package updates, use
+`skills status` and `skills update`; they only inspect or overwrite the managed `smart-search-cli` files and do not change
+provider keys or create Trellis/hooks/agents/commands.
+
 ## Current Architecture
 
 | Capability | Main commands | Providers | Role |
 | --- | --- | --- | --- |
 | `main_search` | `search` | xAI Responses, OpenAI-compatible Chat Completions | Broad answer generation and synthesis |
-| `docs_search` | `exa-search`, `context7-library`, `context7-docs` | Exa, Context7 | Official docs, SDKs, APIs, framework/library evidence |
+| `docs_search` | `context7-library`, `context7-docs`, `exa-search` | Context7, Exa | Official docs, SDKs, APIs, framework/library evidence |
 | `web_search` | `zhipu-search`, intent-routed reinforcement inside `search` | Zhipu, Tavily, Firecrawl | Chinese, domestic, current, domain-filtered, or supplementary web discovery |
 | `web_fetch` | `fetch` | Tavily, Firecrawl | Exact URL content extraction for evidence |
 | `vertical_search` | `anysearch-domains`, `anysearch-search`, `anysearch-extract`, `anysearch-batch` | AnySearch (experimental) | Acceptance testing for structured vertical domains such as CVE, finance, legal, academic, and code/docs |
@@ -114,7 +120,7 @@ Fallback is same-capability only:
 | Capability | Fallback chain |
 | --- | --- |
 | `main_search` | xAI Responses -> OpenAI-compatible |
-| `docs_search` | Exa -> Context7 |
+| `docs_search` | Context7 for library/API/docs intent; Exa for official domains, papers, product pages, and trusted-site discovery |
 | `web_search` | Zhipu -> Tavily -> Firecrawl |
 | `web_fetch` | Tavily -> Firecrawl |
 
@@ -123,6 +129,8 @@ AnySearch is intentionally not part of the `web_search` fallback chain and is no
 The CLI exposes observability fields such as `routing_decision`, `provider_attempts`, `providers_used`, `fallback_used`, `primary_sources`, `extra_sources`, and `source_warning`.
 
 `extra_sources` are discovery candidates. For high-risk claims, news, policy, finance, health, selection decisions, and serious reviews, fetch key pages first and cite fetched text rather than treating a broad search answer as proof.
+
+Routing rule of thumb: start with `search` for broad discovery and synthesis; use Zhipu for Chinese, domestic, policy, announcements, and current-news searches; use Context7 first for library/API/framework docs; use Exa for official domains, papers, product pages, trusted sites, and low-noise discovery; use Tavily/Firecrawl through `search --extra-sources` for horizontal candidates and through `fetch` for page evidence; use AnySearch only when you explicitly need experimental vertical-domain search.
 
 ## Deep Research
 
