@@ -433,23 +433,24 @@ npm pack --dry-run
 
 ## 最新稳定版说明
 
-### v0.1.13
+### v0.1.14
 
-这个稳定版把 0.1.12 beta 线合并进 npm `latest`。
+这个稳定补丁版把已经验证过的 `0.1.13-beta.4` CLI 和内置 skill contract 推到 npm `latest`。
 
-- OpenAI-compatible streaming：`OPENAI_COMPATIBLE_STREAM=true` 或 `smart-search search --stream` 会给 Chat Completions 兼容中转发送 `stream=true`，并在 `routing_decision.openai_compatible_stream` 里记录实际开关；`--no-stream` 可单次关闭。
-- 实验 AnySearch 验收入口：`anysearch-domains`、`anysearch-search`、`anysearch-extract`、`anysearch-batch` 暴露为可选 `vertical_search`，不改变默认 fallback 链，也不进入 `standard` minimum profile。
-- AnySearch setup/config：支持 `ANYSEARCH_API_URL`、`ANYSEARCH_API_KEY`、`ANYSEARCH_TIMEOUT_SECONDS`，并在 `doctor` / `config list` 中脱敏显示。
-- npm 安装包修复：wrapper 可修复缺失的 `.smart-search-python` runtime；npm 包里没有仓库测试目录时，`smart-search regression` 会退到 mock smoke 健康检查。
-- README 和打包的 `smart-search-cli` skill contract 已同步 streaming、AnySearch 边界、setup 参数、发布通道和 Windows npm/mise 验证说明。
+- 修复 GitHub issue #7：npm `latest` 现在包含新版 `smart-search-cli` skill 会调用的 `smart-search skills` 命令。
+- `smart-search skills status` 可以只读检查用户级 skill 是缺失、过期、已最新，还是有额外文件。
+- `smart-search skills update` 用于升级 CLI 后刷新指定 AI 工具里的托管 `smart-search-cli` 文件，不会改 provider key，也不会创建 Trellis/hooks/agents/commands。
+- `smart-search diagnose openai-compatible --format markdown` 会生成适合复制给维护者的 OpenAI-compatible 卡住/超时诊断报告。
+- 文档/API 路由现在优先用 Context7 处理库/框架文档，Exa 继续负责官方域名、论文、产品页和可信站点发现。
+- README、打包 skill 资源、release notes 和测试已经同步说明并验证这次稳定包行为。
 
 ## 发布通道
 
 稳定版走 Git tag 和 npm `latest`：
 
 ```powershell
-git tag v0.1.13
-git push origin v0.1.13
+git tag v0.1.14
+git push origin v0.1.14
 ```
 
 测试版不移动 `latest`。推送到 `main` 会发布下一个 `<package.json version>-beta.N` 到 npm `next`，并且 `N` 按每个稳定版本重新从 1 开始。例如 `0.1.10-beta.1`、`0.1.10-beta.2` 之后是 `0.1.10-beta.3`。

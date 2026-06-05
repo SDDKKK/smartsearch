@@ -64,25 +64,32 @@ smart-search setup
 smart-search doctor --format json
 ```
 
-2. Run a normal live search:
+2. If OpenAI-compatible `search` hangs or times out, generate the short troubleshooting report:
+
+```powershell
+smart-search doctor --format markdown
+smart-search diagnose openai-compatible --format markdown
+```
+
+3. Run a normal live search:
 
 ```powershell
 smart-search search "today's important AI news" --validation balanced --extra-sources 2 --format json
 ```
 
-3. Fetch exact page evidence:
+4. Fetch exact page evidence:
 
 ```powershell
 smart-search fetch "https://example.com/source" --format markdown --output evidence.md
 ```
 
-4. Plan Deep Research:
+5. Plan Deep Research:
 
 ```powershell
 smart-search deep "Deep research recent Bitcoin market movement" --budget standard --format json
 ```
 
-5. Install the skill for AI tools when setup prompts you, or explicitly:
+6. Install the skill for AI tools when setup prompts you, or explicitly:
 
 ```powershell
 smart-search setup --non-interactive --install-skills codex,claude,cursor,hermes
@@ -92,7 +99,7 @@ Skill installation writes the bundled `smart-search-cli` skill into user-level t
 `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills`, and `~/.hermes/skills`. It does not initialize
 Trellis, hooks, agents, or commands. `--skills-root PATH` is only an advanced override for portable or test installs.
 
-6. After upgrading the CLI, refresh the installed global skill:
+7. After upgrading the CLI, refresh the installed global skill:
 
 ```powershell
 smart-search skills status --targets codex --format json
@@ -280,6 +287,7 @@ Provider timeouts:
 | `context7-library` | `c7`, `ctx7` | Resolve Context7 library candidates |
 | `context7-docs` | `c7d`, `c7docs`, `ctx7-docs` | Fetch Context7 docs |
 | `doctor` | `d` | Masked config and connectivity check |
+| `diagnose` | `diag` | Focused OpenAI-compatible troubleshooting report |
 | `setup` | `init` | Interactive or scripted setup |
 | `config` | `cfg` | Local config read/write |
 | `model` | `mdl` | Show explicit provider model settings; use `config set XAI_MODEL` or `OPENAI_COMPATIBLE_MODEL` to change them |
@@ -303,6 +311,7 @@ smart-search exa-similar "https://example.com/source" --num-results 5 --format j
 smart-search fetch "https://example.com/source" --format markdown --output page.md
 smart-search map "https://docs.example.com" --instructions "Find API reference pages" --max-depth 1 --limit 50 --format json
 smart-search doctor --format markdown
+smart-search diagnose openai-compatible --format markdown
 smart-search smoke --mock --format json
 smart-search regression
 ```
@@ -320,6 +329,7 @@ Use Markdown for human-readable reports, detailed diagnostics, source lists, and
 
 ```powershell
 smart-search doctor --format markdown
+smart-search diagnose openai-compatible --format markdown
 smart-search smoke --mock --format markdown
 smart-search exa-search "OpenAI Responses API documentation" --format markdown
 smart-search fetch "https://example.com" --format markdown
@@ -332,7 +342,7 @@ smart-search search "nba report" --format content
 smart-search doctor --format content
 ```
 
-`content` is intentionally brief. Use `doctor --format markdown` for human troubleshooting and `doctor --format json` for the complete machine-readable contract.
+`content` is intentionally brief. Use `doctor --format markdown` for general human troubleshooting, `diagnose openai-compatible --format markdown` for OpenAI-compatible search hangs/timeouts, and JSON formats for complete machine-readable contracts.
 
 Save multi-source evidence under a stable folder:
 
@@ -357,6 +367,15 @@ smart-search setup
 smart-search config list --format json
 smart-search doctor --format markdown
 ```
+
+If OpenAI-compatible `search` hangs or times out after `doctor` passes:
+
+```powershell
+smart-search doctor --format markdown
+smart-search diagnose openai-compatible --format markdown
+```
+
+The diagnose report masks the API key and says whether the problem is missing config, the upstream/relay hanging on the real Smart Search prompt, or a stream/no-stream compatibility mismatch.
 
 If search is slow:
 
@@ -392,23 +411,24 @@ npm pack --dry-run
 
 ## Latest stable release notes
 
-### v0.1.13
+### v0.1.14
 
-This stable release consolidates the 0.1.12 beta line into npm `latest`.
+This stable patch release moves the tested `0.1.13-beta.4` CLI and bundled skill contract into npm `latest`.
 
-- OpenAI-compatible streaming: `OPENAI_COMPATIBLE_STREAM=true` or `smart-search search --stream` sends `stream=true` to Chat Completions relays and records the effective decision in `routing_decision.openai_compatible_stream`. `--no-stream` remains the per-call opt-out.
-- Experimental AnySearch acceptance surface: `anysearch-domains`, `anysearch-search`, `anysearch-extract`, and `anysearch-batch` expose AnySearch as optional `vertical_search` without changing the default fallback chain or `standard` minimum profile.
-- AnySearch setup/config: `ANYSEARCH_API_URL`, `ANYSEARCH_API_KEY`, and `ANYSEARCH_TIMEOUT_SECONDS` are supported by `setup`, `config`, `doctor`, and masked config output.
-- npm packaged install repair: the wrapper can repair a missing `.smart-search-python` runtime and packaged `smart-search regression` still falls back to mock smoke when repository tests are not bundled.
-- Documentation and bundled skill contracts now cover streaming, AnySearch boundaries, setup flags, release lanes, and Windows npm/mise verification.
+- Fixes GitHub issue #7: npm `latest` now includes the `smart-search skills` command expected by the newer installed `smart-search-cli` skill.
+- `smart-search skills status` reports whether installed user-level skills are missing, stale, up to date, or contain extra files without writing anything.
+- `smart-search skills update` refreshes only the managed bundled `smart-search-cli` files for selected AI-tool targets after a CLI upgrade.
+- `smart-search diagnose openai-compatible --format markdown` produces a focused, copy-pasteable troubleshooting report for OpenAI-compatible search hangs/timeouts.
+- Docs/API routing now prefers Context7 for library/framework documentation and keeps Exa for official domains, papers, product pages, and trusted-site discovery.
+- README, bundled skill assets, release notes, and tests now document and verify the exact stable package behavior.
 
 ## Release lanes
 
 Stable releases use Git tags and npm `latest`:
 
 ```powershell
-git tag v0.1.13
-git push origin v0.1.13
+git tag v0.1.14
+git push origin v0.1.14
 ```
 
 Test releases use npm prereleases and do not move `latest`. A push to `main` publishes the next `<package.json version>-beta.N` version under npm dist-tag `next`; `N` resets for each stable base version. To avoid publishing an unwanted beta for a stable bump, the `chore(release): bump version to X.Y.Z` branch commit is skipped by the workflow and the matching `vX.Y.Z` tag publishes npm `latest`. For example, after `0.1.10-beta.1` and `0.1.10-beta.2`, the next `main` publish is `0.1.10-beta.3`.

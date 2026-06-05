@@ -148,13 +148,15 @@ def test_release_docs_explain_beta_lane_and_npm_immutability():
 
 
 def test_current_stable_release_notes_describe_user_visible_changes():
-    notes = (ROOT / ".github" / "releases" / "v0.1.13.md").read_text(encoding="utf-8")
+    notes = (ROOT / ".github" / "releases" / "v0.1.14.md").read_text(encoding="utf-8")
 
     required_markers = [
-        "OpenAI-compatible streaming",
-        "AnySearch acceptance commands",
-        "ANYSEARCH_API_URL",
-        "npm wrapper resilience",
+        "GitHub issue #7",
+        "smart-search skills status",
+        "smart-search skills update",
+        "smart-search diagnose openai-compatible",
+        "Context7",
+        "Exa",
         "Validation",
     ]
     for marker in required_markers:

@@ -141,7 +141,12 @@ Added Trellis-style setup banner and project-local smart-search-cli skill inject
 
 ### Main Changes
 
-(Add details)
+- Added `smart-search diagnose openai-compatible`, with Markdown as the default human-facing report and JSON for scripts/agents.
+- The diagnosis path reports masked OpenAI-compatible config, config path/source, base URL, model, configured stream mode, and timeout.
+- The service checks three stages: lightweight chat completion, real Smart Search search-shape `stream=false`, and real Smart Search search-shape `stream=true`.
+- Search CLI timeout output now includes provider/model/stream context and recommends `smart-search diagnose openai-compatible --format markdown`.
+- README, provider capability spec, public `smart-search-cli` skill, packaged skill asset, and CLI contract docs were kept in sync.
+- `00-bootstrap-guidelines` remains active because its PRD checklist is not complete; no task archive was performed for this unrelated bootstrap task.
 
 ### Git Commits
 
@@ -151,7 +156,12 @@ Added Trellis-style setup banner and project-local smart-search-cli skill inject
 
 ### Testing
 
-- [OK] (Add test results)
+- [OK] `.\.venv\Scripts\python.exe -m compileall -q src tests`
+- [OK] `.\.venv\Scripts\python.exe -m pytest tests -q` -> 234 passed
+- [OK] `.\.venv\Scripts\python.exe -m smart_search.cli regression` -> 172 passed
+- [OK] `.\.venv\Scripts\python.exe -m smart_search.cli smoke --mock --format json` -> `ok: true`
+- [OK] `git diff --check`
+- [OK] Smoke: `diagnose openai-compatible --format json`, `diagnose openai-compatible --format markdown`, and timeout markdown search output.
 
 ### Status
 
@@ -564,6 +574,39 @@ Added standalone smart-search skills status/update commands, rebalanced planner/
 - [OK] `smart-search skills status/update --targets codex --format json`
 - [OK] unknown skill target returns `parameter_error` and exit code 2
 - [OK] `.cc-switch` skill copy SHA256 matches the repo-local skill files
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 16: OpenAI-compatible diagnose command
+
+**Date**: 2026-05-30
+**Task**: OpenAI-compatible diagnose command
+**Branch**: `main`
+
+### Summary
+
+Added a beginner-facing diagnose openai-compatible command, enhanced search timeout guidance, synchronized README/skill/provider contracts, and validated with compileall, pytest, regression, mock smoke, and diff check.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a62efcc` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
 
 ### Status
 
