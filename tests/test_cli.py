@@ -48,6 +48,7 @@ def test_version_flags_exit_successfully(monkeypatch, capsys):
 def test_each_subcommand_help_exits_successfully(capsys):
     commands = [
         ["search", "--help"],
+        ["route", "--help"],
         ["fetch", "--help"],
         ["map", "--help"],
         ["exa-search", "--help"],
@@ -100,6 +101,7 @@ def test_command_aliases_parse_to_canonical_commands():
 
     command_cases = [
         (["s", "query"], "search"),
+        (["rt", "query"], "route"),
         (["f", "https://example.com"], "fetch"),
         (["m", "https://example.com"], "map"),
         (["exa", "query"], "exa-search"),
@@ -385,6 +387,16 @@ def test_doctor_markdown_outputs_human_health_report(monkeypatch, capsys):
             "zhipu_connection_test": {"status": "warning", "message": "HTTP 429"},
             "zhipu_mcp_connection_test": {"status": "not_configured", "message": "missing"},
             "context7_connection_test": {"status": "not_configured", "message": "missing"},
+            "intent_router_status": {
+                "mode": "hybrid",
+                "ok": True,
+                "embeddings_configured": False,
+                "classifier_configured": True,
+                "embedding_model": "",
+                "classifier_model": "intent-mini",
+                "timeout_seconds": 8.0,
+                "degrades_to_rules": True,
+            },
         }
 
     monkeypatch.setattr(cli.service, "doctor", fake_doctor)
@@ -415,6 +427,9 @@ def test_doctor_markdown_outputs_human_health_report(monkeypatch, capsys):
     assert long_message in out
     assert "relay-model" in out
     assert "Tavily ok" in out
+    assert "## Intent Router" in out
+    assert "| classifier_configured | YES |" in out
+    assert "intent-mini" in out
 
 
 def test_doctor_content_outputs_non_empty_summary(monkeypatch, capsys):
@@ -1369,6 +1384,22 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "auto",
         "--minimum-profile",
         "standard",
+        "--intent-router",
+        "hybrid",
+        "--intent-embedding-api-url",
+        "api.example.com/v1/embeddings",
+        "--intent-embedding-api-key",
+        "embed-test-secret",
+        "--intent-embedding-model",
+        "embed-model",
+        "--intent-classifier-api-url",
+        "classifier.example.com/v1/chat/completions",
+        "--intent-classifier-api-key",
+        "classifier-test-secret",
+        "--intent-classifier-model",
+        "intent-mini",
+        "--intent-router-timeout",
+        "4.5",
         "--zhipu-key",
         "zhipu-secret",
         "--zhipu-api-url",
@@ -1423,6 +1454,14 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["SMART_SEARCH_VALIDATION_LEVEL"] == "balanced"
     assert saved["SMART_SEARCH_FALLBACK_MODE"] == "auto"
     assert saved["SMART_SEARCH_MINIMUM_PROFILE"] == "standard"
+    assert saved["SMART_SEARCH_INTENT_ROUTER"] == "hybrid"
+    assert saved["INTENT_EMBEDDING_API_URL"] == "https://api.example.com/v1/embeddings"
+    assert saved["INTENT_EMBEDDING_API_KEY"] == "embed-test-secret"
+    assert saved["INTENT_EMBEDDING_MODEL"] == "embed-model"
+    assert saved["INTENT_CLASSIFIER_API_URL"] == "https://classifier.example.com/v1/chat/completions"
+    assert saved["INTENT_CLASSIFIER_API_KEY"] == "classifier-test-secret"
+    assert saved["INTENT_CLASSIFIER_MODEL"] == "intent-mini"
+    assert saved["INTENT_ROUTER_TIMEOUT_SECONDS"] == "4.5"
     assert saved["ZHIPU_API_KEY"] == "zhipu-secret"
     assert saved["ZHIPU_API_URL"] == "https://zhipu.example.com/api"
     assert saved["ZHIPU_SEARCH_ENGINE"] == "search_pro"
@@ -1448,6 +1487,8 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert "jina-secret" not in out
     assert "zmcp-secret" not in out
     assert "as-test-secret" not in out
+    assert "embed-test-secret" not in out
+    assert "classifier-test-secret" not in out
 
 
 def test_setup_non_interactive_rejects_legacy_flags(capsys):
@@ -1989,6 +2030,48 @@ def test_search_passes_routing_options(monkeypatch, capsys):
     assert code == cli.EXIT_OK
     assert captured == {"validation": "strict", "fallback": "off", "providers": "grok,zhipu"}
     assert json.loads(capsys.readouterr().out)["content"] == "Answer"
+
+
+def test_route_command_outputs_json_markdown_and_content(monkeypatch, capsys):
+    async def fake_route(query, validation="", mode="", allow_remote=True):
+        return {
+            "ok": True,
+            "query": query,
+            "docs_intent": True,
+            "zh_current_intent": False,
+            "web_current_intent": False,
+            "fetch_intent": False,
+            "supplemental_paths": ["docs_search"],
+            "intent_router_mode": mode or "hybrid",
+            "required_capabilities": ["docs_search"],
+            "intent_signals": {"docs_api_intent": True},
+            "confidence": 0.82,
+            "router_engines_used": ["rules"],
+            "degraded": True,
+            "degraded_reason": "embeddings not configured",
+            "reasons": ["rules matched docs/API/library terms"],
+            "validation_level": validation or "balanced",
+            "executed_search": False,
+            "provider_selection": "not_executed",
+        }
+
+    monkeypatch.setattr(cli.service, "route", fake_route)
+
+    assert cli.main(["route", "React useEffect API docs", "--format", "json"]) == cli.EXIT_OK
+    json_data = json.loads(capsys.readouterr().out)
+    assert json_data["required_capabilities"] == ["docs_search"]
+    assert json_data["executed_search"] is False
+
+    assert cli.main(["rt", "React useEffect API docs", "--router-mode", "rules", "--format", "markdown"]) == cli.EXIT_OK
+    markdown = capsys.readouterr().out
+    assert markdown.startswith("# Intent Route")
+    assert "Required capabilities: `docs_search`" in markdown
+    assert "rules matched docs/API/library terms" in markdown
+
+    assert cli.main(["route", "React useEffect API docs", "--format", "content"]) == cli.EXIT_OK
+    content = capsys.readouterr().out
+    assert "capabilities=docs_search" in content
+    assert "mode=hybrid" in content
 
 
 def test_smoke_command_uses_service(monkeypatch, capsys):

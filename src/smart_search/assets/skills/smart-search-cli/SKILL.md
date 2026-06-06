@@ -15,19 +15,20 @@ Use the local `smart-search` command as the default execution layer for web rese
 4. If `doctor` returns `ok: true`, use only `smart-search` CLI subcommands for web research. Do not call Codex native web search in the same task.
 5. Use `smart-search skills status --targets codex --format json` when the global skill may be stale; use `smart-search skills update --targets codex --format json` to refresh this skill without rerunning setup.
 6. Use `smart-search smoke --mock --format json` after CLI/provider architecture changes. Use `--live` only when real keys are available and the user expects live checks.
-7. Use `smart-search search` as the first hop for realtime, broad exploration, community signals, multi-source summaries, and routing metadata.
-8. Use `smart-search zhipu-search` for Chinese-language, domestic China, policy/regulatory, announcements, current news, or China-local source discovery.
-9. Use `smart-search context7-library` / `context7-docs` first for library, SDK, API, framework, or documentation intent.
-10. Use `smart-search exa-search` for official domains, papers, product pages, trusted sites, and low-noise discovery. Do not treat Exa as the universal second hop for every high-risk or verification task.
-11. Use `smart-search search --extra-sources N` for Tavily/Firecrawl horizontal candidates, and `smart-search fetch` for page text that can support final claims.
-12. Use `smart-search anysearch-*` only for explicit experimental vertical search: call `anysearch-domains` first, then `anysearch-search` in a selected domain. Do not use AnySearch as default fallback.
-13. Use `smart-search exa-similar` when the user gives a representative URL and wants related pages or neighboring sources.
-14. Use `smart-search fetch` when the user gives a URL or a claim depends on page content.
-15. Use `smart-search map` when a documentation site or domain structure matters.
-16. Use `smart-search model current` only to inspect explicit provider models. To change models, use `smart-search config set XAI_MODEL ...` or `smart-search config set OPENAI_COMPATIBLE_MODEL ...`.
-17. For current-news, policy, finance, health, or other high-risk facts, do not answer from broad `search.content` alone. Select the second source by intent: Zhipu for Chinese/current/domestic, Context7 for docs/API, Exa for official/trusted domains or papers, then `fetch` key pages and summarize only what fetched text supports.
-18. Use `smart-search research "question" --format json` when the user wants the CLI to run live Deep Research end to end instead of only planning. It executes plan -> discover -> fetch/read -> gap check -> evidence-only synthesis.
-19. Preserve command lines and source URLs in your answer. Prefer citing fetched pages or `primary_sources`; treat `extra_sources` as follow-up candidates, not verified evidence for generated claims.
+7. Use `smart-search route "query" --format markdown` when you need to explain intent routing without executing providers.
+8. Use `smart-search search` as the first hop for realtime, broad exploration, community signals, multi-source summaries, and routing metadata.
+9. Use `smart-search zhipu-search` for Chinese-language, domestic China, policy/regulatory, announcements, current news, or China-local source discovery.
+10. Use `smart-search context7-library` / `context7-docs` first for library, SDK, API, framework, or documentation intent.
+11. Use `smart-search exa-search` for official domains, papers, product pages, trusted sites, and low-noise discovery. Do not treat Exa as the universal second hop for every high-risk or verification task.
+12. Use `smart-search search --extra-sources N` for Tavily/Firecrawl horizontal candidates, and `smart-search fetch` for page text that can support final claims.
+13. Use `smart-search anysearch-*` only for explicit experimental vertical search: call `anysearch-domains` first, then `anysearch-search` in a selected domain. Do not use AnySearch as default fallback.
+14. Use `smart-search exa-similar` when the user gives a representative URL and wants related pages or neighboring sources.
+15. Use `smart-search fetch` when the user gives a URL or a claim depends on page content.
+16. Use `smart-search map` when a documentation site or domain structure matters.
+17. Use `smart-search model current` only to inspect explicit provider models. To change models, use `smart-search config set XAI_MODEL ...` or `smart-search config set OPENAI_COMPATIBLE_MODEL ...`.
+18. For current-news, policy, finance, health, or other high-risk facts, do not answer from broad `search.content` alone. Select the second source by intent: Zhipu for Chinese/current/domestic, Context7 for docs/API, Exa for official/trusted domains or papers, then `fetch` key pages and summarize only what fetched text supports.
+19. Use `smart-search research "question" --format json` when the user wants the CLI to run live Deep Research end to end instead of only planning. It executes plan -> discover -> fetch/read -> gap check -> evidence-only synthesis.
+20. Preserve command lines and source URLs in your answer. Prefer citing fetched pages or `primary_sources`; treat `extra_sources` as follow-up candidates, not verified evidence for generated claims.
 
 ## Deep Research Mode
 
@@ -145,6 +146,23 @@ Research provider advantage routing:
 
 Safe research overrides are `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS`. They may reorder or disable providers only within capabilities the provider already supports; they must not move a provider across capability boundaries.
 
+## Intent Routing Diagnostics
+
+`smart-search route "query"` explains which capabilities the unified `IntentRouter` selected without running providers. It is the right command when the user asks why a prompt triggered docs/current/fetch/vertical routing.
+
+The router output keeps old fields such as `docs_intent`, `zh_current_intent`, `web_current_intent`, `fetch_intent`, and `supplemental_paths`, and adds `intent_router_mode`, `required_capabilities`, `intent_signals`, `confidence`, `router_engines_used`, `degraded`, `degraded_reason`, and `reasons`.
+
+Intent router rules:
+
+- `SMART_SEARCH_INTENT_ROUTER=hybrid|rules|off`, default `hybrid`.
+- Optional semantic routing uses `INTENT_EMBEDDING_API_URL`, `INTENT_EMBEDDING_API_KEY`, and `INTENT_EMBEDDING_MODEL`.
+- Optional model classification uses `INTENT_CLASSIFIER_API_URL`, `INTENT_CLASSIFIER_API_KEY`, and `INTENT_CLASSIFIER_MODEL`.
+- `INTENT_ROUTER_TIMEOUT_SECONDS` defaults to `8`.
+- Missing or failing embeddings/classifier degrade to rules and should not fail ordinary `search`.
+- The router returns capabilities only: `docs_search`, `web_search`, `web_fetch`, `vertical_search`.
+- Classifier output cannot select providers. Unknown capability names and provider names are ignored.
+- `deep` remains offline and must not call embeddings or classifier components.
+
 Deep Research smoke matrix for workflow maintenance is mock-full plus live-limited. Mock-full coverage should include trigger phrases, normal search requests that should not trigger Deep Research, required `research_plan` fields, allowed tool whitelist, `fetch_before_claim`, evidence output paths, capability boundaries, `intent_signals`, `capability_plan`, `gap_check`, simple current prompts such as `深度搜索一下最近的比特币行情`, docs/API prompts, claim-verification prompts, user-provided URL fetch-first flows, missing-provider failure guidance, and the rule that fixed topic recipe ids are not required schema. Live-limited coverage should run `doctor`, one broad `search`, one `exa-search`, and one `fetch` only when real keys are available and the user expects live checks.
 
 Standard user-facing Deep Research tests:
@@ -159,6 +177,9 @@ smart-search deep "https://example.com/source" --format json
 ## Provider Routing
 
 - `search` builds `main_search` from configured peer providers: `XAI_API_KEY` for xAI Responses and `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` for OpenAI-compatible Chat Completions.
+- `search` uses unified `IntentRouter` output to populate `required_capabilities` and `supplemental_paths`; provider execution still follows capability-first fallback.
+- `research` reuses the same `IntentRouter` before provider-advantage ordering.
+- `deep` uses offline rules/local signals only and must not call remote embeddings or classifier components.
 - `search` is the default first hop for broad exploration, current synthesis, and routing metadata.
 - Official xAI uses the Responses API `/responses` route through `XAI_*`. Compatible relays/gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
 - `OPENAI_COMPATIBLE_STREAM=true` or `search --stream` sets `stream=true` only for OpenAI-compatible `search` and provider-side `fetch`; it is a relay compatibility switch and does not affect xAI Responses, URL description, or source ranking.
@@ -265,6 +286,7 @@ smart-search setup --non-interactive --install-skills hermes
 smart-search skills status --targets codex --format json
 smart-search skills update --targets codex --format json
 smart-search skills update --all --format json
+smart-search route "React useEffect API docs" --format markdown
 smart-search setup --non-interactive --zhipu-api-url "https://open.bigmodel.cn/api" --zhipu-search-engine "search_std"
 smart-search setup --non-interactive --openai-compatible-stream true
 smart-search setup --non-interactive --anysearch-api-url "https://api.anysearch.com/mcp" --anysearch-key "key"
@@ -283,6 +305,14 @@ smart-search config set OPENAI_COMPATIBLE_STREAM "true" --format json
 smart-search config set ANYSEARCH_API_URL "https://api.anysearch.com/mcp" --format json
 smart-search config set ANYSEARCH_API_KEY "key" --format json
 smart-search config set ANYSEARCH_TIMEOUT_SECONDS "30" --format json
+smart-search config set SMART_SEARCH_INTENT_ROUTER "hybrid" --format json
+smart-search config set INTENT_EMBEDDING_API_URL "https://api.openai.com/v1/embeddings" --format json
+smart-search config set INTENT_EMBEDDING_API_KEY "key" --format json
+smart-search config set INTENT_EMBEDDING_MODEL "text-embedding-3-small" --format json
+smart-search config set INTENT_CLASSIFIER_API_URL "https://api.openai.com/v1/chat/completions" --format json
+smart-search config set INTENT_CLASSIFIER_API_KEY "key" --format json
+smart-search config set INTENT_CLASSIFIER_MODEL "gpt-4.1-mini" --format json
+smart-search config set INTENT_ROUTER_TIMEOUT_SECONDS "8" --format json
 smart-search config set EXA_API_KEY "key" --format json
 smart-search config set CONTEXT7_API_KEY "key" --format json
 smart-search config set ZHIPU_API_KEY "key" --format json
@@ -305,6 +335,7 @@ Short aliases are supported for interactive use:
 ```powershell
 smart-search --v
 smart-search s "query" --format json
+smart-search rt "React useEffect API docs" --format markdown
 smart-search s "nba战报" --format content
 smart-search rs "query" --format json
 smart-search f "https://example.com" --format markdown

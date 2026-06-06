@@ -17,6 +17,7 @@
 ## Commands
 
 - `smart-search search QUERY [--platform NAME] [--model ID] [--extra-sources N] [--validation fast|balanced|strict] [--fallback auto|off] [--providers auto|CSV] [--stream|--no-stream] [--timeout SECONDS] [--format json|markdown|content] [--output PATH]`
+- `smart-search route QUERY [--validation fast|balanced|strict] [--router-mode hybrid|rules|off] [--format json|markdown|content] [--output PATH]`
 - `smart-search fetch URL [--format json|markdown|content] [--output PATH]`
 - `smart-search exa-search QUERY [--num-results N] [--search-type neural|keyword|auto] [--include-text] [--include-highlights] [--start-published-date YYYY-MM-DD] [--include-domains DOMAIN...] [--exclude-domains DOMAIN...] [--category NAME] [--format json|markdown|content] [--output PATH]`
 - `smart-search exa-similar URL [--num-results N] [--format json|markdown|content] [--output PATH]`
@@ -56,6 +57,7 @@ Top-level aliases must normalize to the same service behavior as their full comm
 | --- | --- |
 | `smart-search --version` | `smart-search --v`, `smart-search -v` |
 | `search` | `s` |
+| `route` | `rt` |
 | `fetch` | `f` |
 | `map` | `m` |
 | `exa-search` | `exa`, `x` |
@@ -97,11 +99,13 @@ Nested aliases:
 
 Successful search output includes `ok`, `query`, `primary_api_mode`, `content`, `sources`, `sources_count`, `primary_sources`, `primary_sources_count`, `extra_sources`, `extra_sources_count`, `source_warning`, `routing_decision`, `providers_used`, `provider_attempts`, `fallback_used`, `validation_level`, and `elapsed_ms`. Each source should include at least `url` when available.
 
+Route diagnostic output includes `ok`, `query`, `executed_search=false`, `provider_selection=not_executed`, backward-compatible fields `docs_intent`, `zh_current_intent`, `web_current_intent`, `fetch_intent`, `supplemental_paths`, and unified intent-router fields `intent_router_mode`, `required_capabilities`, `intent_signals`, `confidence`, `router_engines_used`, `degraded`, `degraded_reason`, and `reasons`. `smart-search route` must not call search/docs/fetch providers.
+
 `--format json` is the stable machine-readable contract for agents and scripts. JSON output remains parseable and uses readable non-ASCII text when the terminal encoding supports it.
 
-`--format markdown` is the human-readable report format. `doctor --format markdown` must render a detailed diagnostic report with overall status, active/default/legacy config paths, log path resolution, file-logging status, masked config values with sources, minimum profile, capability status, main-search provider checks, provider connectivity checks, model metadata, and full long error/message detail instead of falling back to raw JSON. `diagnose openai-compatible --format markdown` must render a short copy-pasteable troubleshooting report with masked config, quick chat check, real search-shape `stream=false` and `stream=true` checks, a plain-language summary, and a next command. Provider list commands such as `exa-search`, `exa-similar`, `zhipu-search`, `anysearch-*`, `context7-library`, and `map` render result lists or a clear no-results message.
+`--format markdown` is the human-readable report format. `route --format markdown` must render the selected capabilities, engines, confidence, degradation reason, reasons, and signals without provider execution. `doctor --format markdown` must render a detailed diagnostic report with overall status, active/default/legacy config paths, log path resolution, file-logging status, masked config values with sources, minimum profile, capability status, main-search provider checks, provider connectivity checks, intent router status, model metadata, and full long error/message detail instead of falling back to raw JSON. `diagnose openai-compatible --format markdown` must render a short copy-pasteable troubleshooting report with masked config, quick chat check, real search-shape `stream=false` and `stream=true` checks, a plain-language summary, and a next command. Provider list commands such as `exa-search`, `exa-similar`, `zhipu-search`, `anysearch-*`, `context7-library`, and `map` render result lists or a clear no-results message.
 
-`--format content` prints only the `content` field for content-bearing commands such as `search`, `fetch`, `context7-docs`, and `research`. Commands without a `content` field, including `doctor`, `smoke`, `config`, and `model`, must print a compact non-empty text summary rather than an empty stdout.
+`--format content` prints only the `content` field for content-bearing commands such as `search`, `fetch`, `context7-docs`, and `research`. Commands without a `content` field, including `route`, `doctor`, `smoke`, `config`, and `model`, must print a compact non-empty text summary rather than an empty stdout.
 
 Source provenance fields:
 
@@ -156,6 +160,18 @@ OpenAI-compatible streaming:
 - `search --stream` and `search --no-stream` override `OPENAI_COMPATIBLE_STREAM` for the current invocation.
 - Streaming applies only to OpenAI-compatible `search()` and provider-side `fetch()` calls. `describe_url()` and `rank_sources()` stay non-streaming. xAI Responses behavior is unchanged.
 
+Intent router:
+
+- `SMART_SEARCH_INTENT_ROUTER` accepts `hybrid`, `rules`, and `off`; default is `hybrid`.
+- `INTENT_EMBEDDING_API_URL`, `INTENT_EMBEDDING_API_KEY`, and `INTENT_EMBEDDING_MODEL` configure optional OpenAI-compatible embeddings for semantic capability routing.
+- `INTENT_CLASSIFIER_API_URL`, `INTENT_CLASSIFIER_API_KEY`, and `INTENT_CLASSIFIER_MODEL` configure optional OpenAI-compatible chat-completions classification.
+- `INTENT_ROUTER_TIMEOUT_SECONDS` defaults to `8` and applies only to optional remote router calls.
+- Hybrid mode is fail-open: missing or failing embeddings/classifier record `degraded=true` and `degraded_reason`, then local rules still route the request.
+- The router returns capabilities only: `docs_search`, `web_search`, `web_fetch`, and `vertical_search`. It must not select providers.
+- Classifier output is capability-whitelisted. Unknown capability names and provider names are ignored and recorded in route reasons.
+- `search` and `research` use the unified router. `deep` remains an offline planner and must not call embeddings or classifier components.
+- `doctor` reports intent router mode, whether embeddings/classifier are configured, model names, timeout, and that it degrades to rules. It must not expose router API keys.
+
 AnySearch experimental output:
 
 - AnySearch uses JSON-RPC 2.0 `tools/call` at `ANYSEARCH_API_URL`, default `https://api.anysearch.com/mcp`.
@@ -185,7 +201,7 @@ Deep planner output includes `ok`, `mode`, `query_mode`, `question`, `trigger_so
 
 Research executor output includes `ok`, `mode=deep_research_execution`, `query_mode=research`, `question`, `budget`, `research_plan`, `routing_decision`, `stage_results`, `discovery_sources`, `final_answer`, `content`, `citations`, `evidence_items`, `gap_check`, `provider_attempts`, `providers_used`, `fallback_used`, `degraded`, `route_policy_version`, `evidence_dir`, `minimum_profile_ok`, `capability_status`, and `elapsed_ms`. Citations must come only from fetched/read `evidence_items`; discovery sources are candidates until fetched. If evidence cannot close, `research` returns degraded gaps instead of unsupported claims.
 
-Diagnostic output masks keys, reports `config_file` / `config_dir` / `config_dir_source` / `default_config_file` / Windows legacy config metadata / `config_dir_override_value` / `config_dir_override_matches_default` / `log_dir_config_value` / `resolved_log_dir` / `file_logging_enabled` / `config_sources` / `primary_api_mode` / `primary_api_mode_source` / provider timeout values / `capability_status` / `minimum_profile_ok`, and includes `main_search_connection_tests` plus connection test objects for Exa, Tavily, Zhipu, Context7, and Firecrawl. `primary_connection_test` remains as a backward-compatible alias for the first configured main provider check. OpenAI-compatible provider health must be validated through `/chat/completions`; `/models` is supplementary metadata and must not be the health gate. Firecrawl currently reports whether `FIRECRAWL_API_KEY` is configured; it is not a live Firecrawl request.
+Diagnostic output masks keys, reports `config_file` / `config_dir` / `config_dir_source` / `default_config_file` / Windows legacy config metadata / `config_dir_override_value` / `config_dir_override_matches_default` / `log_dir_config_value` / `resolved_log_dir` / `file_logging_enabled` / `config_sources` / `primary_api_mode` / `primary_api_mode_source` / provider timeout values / `capability_status` / `minimum_profile_ok` / `intent_router_status`, and includes `main_search_connection_tests` plus connection test objects for Exa, Tavily, Zhipu, Context7, and Firecrawl. `primary_connection_test` remains as a backward-compatible alias for the first configured main provider check. OpenAI-compatible provider health must be validated through `/chat/completions`; `/models` is supplementary metadata and must not be the health gate. Firecrawl currently reports whether `FIRECRAWL_API_KEY` is configured; it is not a live Firecrawl request.
 
 When a Windows user reports that different versions seem to use different config paths, diagnose in this order: `config_dir_source`, `config_dir_override_value`, `config_dir_override_matches_default`, then `legacy_windows_config_exists`. A source of `environment` with `config_dir_override_matches_default=true` means the active path is pinned by `SMART_SEARCH_CONFIG_DIR` but is functionally the same as the current default. Do not delete either config file or the user-level override until the upgraded CLI has been verified with `config path`, `doctor`, and smoke/regression checks.
 
@@ -350,6 +366,9 @@ Agent timeout handling contract:
 ## Provider Routing
 
 - `search` builds `main_search` from peer providers only: `XAI_API_KEY` registers official xAI Responses, while `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` registers OpenAI-compatible Chat Completions.
+- `search` uses unified `IntentRouter` output to populate `required_capabilities` and `supplemental_paths`; provider execution still follows the capability registry and same-capability fallback.
+- `research` reuses the unified `IntentRouter` before provider-advantage ordering.
+- `deep` uses offline rules/local signals only; it must not call remote embeddings or classifier components.
 - Official xAI calls use the Responses API `/responses` route through `XAI_*`. Compatible relays/gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
 - `OPENAI_COMPATIBLE_STREAM` and `search --stream/--no-stream` affect only the OpenAI-compatible Chat Completions transport for search/fetch. They do not change xAI Responses or provider-internal ranking/URL description tasks.
 - Legacy `SMART_SEARCH_API_URL`, `SMART_SEARCH_API_KEY`, `SMART_SEARCH_API_MODE`, `SMART_SEARCH_MODEL`, and `SMART_SEARCH_XAI_TOOLS` are unsupported config keys. `config set` / `config unset` must return a parameter error for them.
@@ -381,6 +400,7 @@ Agent timeout handling contract:
 
 ## Routing Heuristics
 
+- Use `smart-search route "query" --format markdown` when you need to explain why a query maps to `docs_search`, `web_search`, `web_fetch`, or `vertical_search` without executing providers.
 - Use `exa-search --include-domains` when official documentation domains are known.
 - Use `context7-library` / `context7-docs` for docs/API/SDK/library/framework intent when Context7 is configured.
 - Use `zhipu-search` for Chinese, domestic, current, or domain-filtered source discovery when Zhipu is configured.

@@ -276,6 +276,40 @@ Main-search peer rule:
   OpenAI-compatible `search()` and provider-side `fetch()`. It must not affect
   xAI Responses, URL description, source ranking, or capability routing.
 
+Intent router contract:
+
+- `IntentRouter` is capability-first. It may output only capability names from
+  `docs_search`, `web_search`, `web_fetch`, and `vertical_search`; it must never
+  output or honor provider ids such as `zhipu`, `context7`, `jina`, or
+  `openai-compatible` as routing decisions.
+- `SMART_SEARCH_INTENT_ROUTER` accepts `hybrid`, `rules`, and `off`; default is
+  `hybrid`. `hybrid` runs local rules first, then optional embeddings and
+  optional classifier components when configured.
+- Embeddings are OpenAI-compatible `/embeddings` calls configured by
+  `INTENT_EMBEDDING_API_URL`, `INTENT_EMBEDDING_API_KEY`, and
+  `INTENT_EMBEDDING_MODEL`. They compare the user query with built-in
+  capability utterances and may add a capability only when the similarity score
+  clears the semantic threshold.
+- Classifier routing is OpenAI-compatible `/chat/completions` JSON
+  classification configured by `INTENT_CLASSIFIER_API_URL`,
+  `INTENT_CLASSIFIER_API_KEY`, and `INTENT_CLASSIFIER_MODEL`. The classifier
+  receives the query, rules result, semantic scores, and allowed capability
+  names, and must return strict JSON. Unknown capability names and provider
+  names are ignored by code.
+- Hybrid routing is fail-open to rules. Missing, timed out, or failed remote
+  embeddings/classifier calls must set `degraded=true` and `degraded_reason`;
+  ordinary `search` must not fail because optional intent router components are
+  unavailable.
+- `deep` is an offline planner and must use local rules/signals only. It must
+  not call remote embeddings or classifier components.
+- The classifier must not broaden generic explanation or docs-like queries into
+  `web_search` merely because tutorials or community discussion might help.
+  Adding `web_search` from classifier output requires a concrete currentness,
+  strict validation, cross-validation, known URL/fetch, recency, or medium/high
+  claim-risk signal. This protects prompts like `中文解释 Python 函数` from
+  unnecessary realtime/source reinforcement while still allowing `今天国内 AI 新闻`
+  and strict URL verification to use `web_search`.
+
 AnySearch boundary:
 
 - AnySearch is an experimental `vertical_search` provider exposed only through

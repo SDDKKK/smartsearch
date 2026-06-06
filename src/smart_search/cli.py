@@ -29,6 +29,7 @@ EXIT_RUNTIME_ERROR = 5
 
 COMMAND_ALIASES = {
     "search": ["s"],
+    "route": ["rt"],
     "fetch": ["f"],
     "map": ["m"],
     "exa-search": ["exa", "x"],
@@ -463,6 +464,26 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
         lines.extend(_markdown_table(["Provider", "Status", "Latency", "Message"], rows))
         lines.extend(_provider_detail_lines("Provider Check Details", dict(provider_tests)))
 
+    router = data.get("intent_router_status") or {}
+    if router:
+        lines.extend(["", "## Intent Router"])
+        lines.extend(
+            _markdown_table(
+                ["Field", "Value"],
+                [
+                    ["mode", router.get("mode", "")],
+                    ["embeddings_configured", _yes_no(router.get("embeddings_configured"))],
+                    ["classifier_configured", _yes_no(router.get("classifier_configured"))],
+                    ["embedding_model", router.get("embedding_model", "")],
+                    ["classifier_model", router.get("classifier_model", "")],
+                    ["timeout_seconds", router.get("timeout_seconds", "")],
+                    ["degrades_to_rules", _yes_no(router.get("degrades_to_rules"))],
+                ],
+            )
+        )
+        if router.get("error"):
+            lines.append(f"Intent router error: {router.get('error')}")
+
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
@@ -573,6 +594,35 @@ def _format_diagnose_markdown(data: dict[str, Any]) -> str:
     if data.get("next_command"):
         lines.extend(["", "## Next Command"])
         lines.extend(_markdown_code_block(data.get("next_command")))
+    lines.extend(_error_lines(data))
+    return "\n".join(lines).strip() + "\n"
+
+
+def _format_route_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        "# Intent Route",
+        "",
+        f"Status: {_status_label(data.get('ok'))}",
+        f"Query: `{data.get('query', '')}`",
+        f"Mode: `{data.get('intent_router_mode', '')}`",
+        f"Executed search: {_yes_no(data.get('executed_search'))}",
+        f"Required capabilities: `{', '.join(data.get('required_capabilities') or [])}`",
+        f"Confidence: `{data.get('confidence', '')}`",
+        f"Engines: `{', '.join(data.get('router_engines_used') or [])}`",
+        f"Degraded: {_yes_no(data.get('degraded'))}",
+    ]
+    if data.get("degraded_reason"):
+        lines.append(f"Degraded reason: {data.get('degraded_reason')}")
+    reasons = data.get("reasons") or []
+    if reasons:
+        lines.extend(["", "## Reasons"])
+        for reason in reasons:
+            lines.append(f"- {reason}")
+    signals = data.get("intent_signals") or {}
+    if signals:
+        rows = [[key, value] for key, value in sorted(signals.items())]
+        lines.extend(["", "## Signals"])
+        lines.extend(_markdown_table(["Signal", "Value"], rows))
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
@@ -768,6 +818,8 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         if gap_check:
             lines.extend(["", "## Gap Check", gap_check.get("rule", "")])
         return "\n".join(lines).strip() + "\n"
+    if command == "route":
+        return _format_route_markdown(data)
     if command == "research":
         lines = [
             "# Research Report",
@@ -862,6 +914,17 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         if error:
             return f"{_status_label(data.get('ok'))}: {error}\n"
         return ""
+    if command == "route":
+        capabilities = ", ".join(data.get("required_capabilities") or []) or "none"
+        lines = [
+            f"Intent route {_status_label(data.get('ok'))}: capabilities={capabilities}",
+            f"mode={data.get('intent_router_mode', '')}; confidence={data.get('confidence', '')}; engines={','.join(data.get('router_engines_used') or [])}",
+        ]
+        if data.get("degraded_reason"):
+            lines.append(f"degraded={data.get('degraded_reason')}")
+        if data.get("error"):
+            lines.append(f"Error: {_error_summary(data)}")
+        return "\n".join(lines).strip() + "\n"
     if command == "deep" or data.get("mode") == "deep_research":
         lines = [
             f"Deep Research plan for: {data.get('question', '')}",
@@ -1897,6 +1960,14 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("SMART_SEARCH_VALIDATION_LEVEL", "Validation level (fast/balanced/strict)", True),
         ("SMART_SEARCH_FALLBACK_MODE", "Fallback mode (auto/off)", True),
         ("SMART_SEARCH_MINIMUM_PROFILE", "Minimum profile (standard/off)", True),
+        ("SMART_SEARCH_INTENT_ROUTER", "Intent router mode (hybrid/rules/off)", True),
+        ("INTENT_EMBEDDING_API_URL", "Intent embedding API URL", True),
+        ("INTENT_EMBEDDING_API_KEY", "Intent embedding API key", True),
+        ("INTENT_EMBEDDING_MODEL", "Intent embedding model", True),
+        ("INTENT_CLASSIFIER_API_URL", "Intent classifier API URL", True),
+        ("INTENT_CLASSIFIER_API_KEY", "Intent classifier API key", True),
+        ("INTENT_CLASSIFIER_MODEL", "Intent classifier model", True),
+        ("INTENT_ROUTER_TIMEOUT_SECONDS", "Intent router timeout seconds", True),
         ("EXA_API_KEY", "Exa API key", True),
         ("CONTEXT7_API_KEY", "Context7 API key", True),
         ("ZHIPU_API_KEY", "Zhipu API key", True),
@@ -1957,6 +2028,9 @@ async def _run_async(args: argparse.Namespace) -> int:
             data = _search_timeout_result(args.query, args.timeout, search_kwargs)
             return _print_result("search", data, args.format, args.output)
         return _print_result("search", data, args.format, args.output)
+    if args.command == "route":
+        data = await service.route(args.query, validation=args.validation, mode=args.router_mode)
+        return _print_result("route", data, args.format, args.output)
     if args.command == "fetch":
         data = await service.fetch(args.url)
         return _print_result("fetch", data, args.format, args.output)
@@ -2145,6 +2219,14 @@ def _run_setup(args: argparse.Namespace) -> int:
         "SMART_SEARCH_VALIDATION_LEVEL": args.validation_level,
         "SMART_SEARCH_FALLBACK_MODE": args.fallback_mode,
         "SMART_SEARCH_MINIMUM_PROFILE": args.minimum_profile,
+        "SMART_SEARCH_INTENT_ROUTER": args.intent_router,
+        "INTENT_EMBEDDING_API_URL": _normalize_custom_base_url(args.intent_embedding_api_url),
+        "INTENT_EMBEDDING_API_KEY": args.intent_embedding_api_key,
+        "INTENT_EMBEDDING_MODEL": args.intent_embedding_model,
+        "INTENT_CLASSIFIER_API_URL": _normalize_custom_base_url(args.intent_classifier_api_url),
+        "INTENT_CLASSIFIER_API_KEY": args.intent_classifier_api_key,
+        "INTENT_CLASSIFIER_MODEL": args.intent_classifier_model,
+        "INTENT_ROUTER_TIMEOUT_SECONDS": args.intent_router_timeout,
         "EXA_API_KEY": args.exa_key,
         "CONTEXT7_API_KEY": args.context7_key,
         "ZHIPU_API_KEY": args.zhipu_key,
@@ -2238,6 +2320,7 @@ def _run_regression() -> int:
         "tests/test_jina_provider.py",
         "tests/test_zhipu_mcp_provider.py",
         "tests/test_smoke.py",
+        "tests/test_intent_router.py",
         "tests/test_regression.py",
         "tests/test_release_workflow.py",
     ]
@@ -2277,6 +2360,20 @@ def build_parser() -> argparse.ArgumentParser:
     stream_group.add_argument("--no-stream", dest="stream", action="store_false", help="Force stream=false for OpenAI-compatible main search.")
     search_parser.add_argument("--timeout", type=float, default=90, metavar="SECONDS", help="Hard timeout in seconds.")
     _add_format_args(search_parser)
+
+    route_parser = sub.add_parser(
+        "route", aliases=COMMAND_ALIASES["route"], help="Explain intent routing without running providers."
+    )
+    route_parser.set_defaults(command="route")
+    route_parser.add_argument("query")
+    route_parser.add_argument("--validation", choices=["fast", "balanced", "strict"], default="")
+    route_parser.add_argument(
+        "--router-mode",
+        choices=["hybrid", "rules", "off"],
+        default="",
+        help="Override SMART_SEARCH_INTENT_ROUTER for this diagnostic call.",
+    )
+    _add_format_args(route_parser)
 
     fetch_parser = sub.add_parser("fetch", aliases=COMMAND_ALIASES["fetch"], help="Fetch a URL as markdown.")
     fetch_parser.set_defaults(command="fetch")
@@ -2571,6 +2668,14 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--validation-level", default="", help="Save SMART_SEARCH_VALIDATION_LEVEL.")
     setup_parser.add_argument("--fallback-mode", default="", help="Save SMART_SEARCH_FALLBACK_MODE.")
     setup_parser.add_argument("--minimum-profile", default="", help="Save SMART_SEARCH_MINIMUM_PROFILE.")
+    setup_parser.add_argument("--intent-router", default="", help="Save SMART_SEARCH_INTENT_ROUTER.")
+    setup_parser.add_argument("--intent-embedding-api-url", default="", help="Save INTENT_EMBEDDING_API_URL.")
+    setup_parser.add_argument("--intent-embedding-api-key", default="", help="Save INTENT_EMBEDDING_API_KEY.")
+    setup_parser.add_argument("--intent-embedding-model", default="", help="Save INTENT_EMBEDDING_MODEL.")
+    setup_parser.add_argument("--intent-classifier-api-url", default="", help="Save INTENT_CLASSIFIER_API_URL.")
+    setup_parser.add_argument("--intent-classifier-api-key", default="", help="Save INTENT_CLASSIFIER_API_KEY.")
+    setup_parser.add_argument("--intent-classifier-model", default="", help="Save INTENT_CLASSIFIER_MODEL.")
+    setup_parser.add_argument("--intent-router-timeout", default="", help="Save INTENT_ROUTER_TIMEOUT_SECONDS.")
     setup_parser.add_argument("--exa-key", default="", help="Save EXA_API_KEY.")
     setup_parser.add_argument("--context7-key", default="", help="Save CONTEXT7_API_KEY.")
     setup_parser.add_argument("--zhipu-key", default="", help="Save ZHIPU_API_KEY.")

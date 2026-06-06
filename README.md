@@ -32,6 +32,19 @@ The current architecture has two layers:
 
 Default `smart-search search` stays fast and live. `smart-search deep` is the explicit offline Deep Research planner. It does not call providers, run `doctor`, or fetch pages by default; it emits a `research_plan` that an AI agent or user can execute step by step. `smart-search research` is the live Deep Research executor: it uses the same planner shape, then runs discovery, fetch/read, gap check, and evidence-only synthesis.
 
+Intent routing now has its own layer. Instead of letting a model pick providers directly, Smart Search first decides which capabilities are needed, then the existing capability-first provider registry chooses same-capability fallback:
+
+```text
+user query
+ -> rules: URLs, explicit docs/current/fetch/vertical signals, strict validation
+ -> semantic route: optional embeddings over capability examples
+ -> classifier route: optional structured model classification
+ -> merged required_capabilities
+ -> provider fallback inside docs_search / web_search / web_fetch / vertical_search
+```
+
+`smart-search route "query"` explains this decision without calling search, docs, fetch, or provider APIs. `smart-search deep` keeps the offline planner contract and uses local/rules signals only.
+
 ## Install
 
 Stable channel:
@@ -78,25 +91,32 @@ smart-search diagnose openai-compatible --format markdown
 smart-search search "today's important AI news" --validation balanced --extra-sources 2 --format json
 ```
 
-4. Fetch exact page evidence:
+4. Inspect intent routing without running providers:
+
+```powershell
+smart-search route "React useEffect API docs" --format markdown
+smart-search route "请核验这个链接里的说法 https://example.com/source" --format json
+```
+
+5. Fetch exact page evidence:
 
 ```powershell
 smart-search fetch "https://example.com/source" --format markdown --output evidence.md
 ```
 
-5. Plan Deep Research:
+6. Plan Deep Research:
 
 ```powershell
 smart-search deep "Deep research recent Bitcoin market movement" --budget standard --format json
 ```
 
-6. Run live Deep Research when you want the CLI to execute the staged workflow:
+7. Run live Deep Research when you want the CLI to execute the staged workflow:
 
 ```powershell
 smart-search research "Deep research recent Bitcoin market movement" --budget deep --format markdown
 ```
 
-7. Install the skill for AI tools when setup prompts you, or explicitly:
+8. Install the skill for AI tools when setup prompts you, or explicitly:
 
 ```powershell
 smart-search setup --non-interactive --install-skills codex,claude,cursor,hermes
@@ -106,7 +126,7 @@ Skill installation writes the bundled `smart-search-cli` skill into user-level t
 `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills`, and `~/.hermes/skills`. It does not initialize
 Trellis, hooks, agents, or commands. `--skills-root PATH` is only an advanced override for portable or test installs.
 
-8. After upgrading the CLI, refresh the installed global skill:
+9. After upgrading the CLI, refresh the installed global skill:
 
 ```powershell
 smart-search skills status --targets codex --format json
@@ -144,6 +164,8 @@ AnySearch is intentionally not part of the `web_search` fallback chain and is no
 Jina Reader is a `web_fetch` provider only. `JINA_API_KEY` is required before Jina satisfies `SMART_SEARCH_MINIMUM_PROFILE=standard`; anonymous `r.jina.ai` behavior is treated as explicit/experimental fetch behavior and must not weaken fail-closed setup checks.
 
 The CLI exposes observability fields such as `routing_decision`, `provider_attempts`, `providers_used`, `fallback_used`, `primary_sources`, `extra_sources`, and `source_warning`.
+
+`routing_decision` keeps backward-compatible booleans such as `docs_intent`, `zh_current_intent`, `web_current_intent`, `fetch_intent`, and `supplemental_paths`, and also includes the unified router fields: `intent_router_mode`, `required_capabilities`, `intent_signals`, `confidence`, `router_engines_used`, and `degraded_reason`.
 
 `extra_sources` are discovery candidates. For high-risk claims, news, policy, finance, health, selection decisions, and serious reviews, fetch key pages first and cite fetched text rather than treating a broad search answer as proof.
 
@@ -233,6 +255,21 @@ Use `smart-search setup` for normal configuration. Environment variables remain 
 | Firecrawl | Fetch fallback and supplementary web sources | `FIRECRAWL_API_URL`, `FIRECRAWL_API_KEY` | [Firecrawl docs](https://docs.firecrawl.dev/) | [Firecrawl API keys](https://www.firecrawl.dev/app/api-keys) |
 | AnySearch | Experimental vertical search acceptance surface; not a default fallback | `ANYSEARCH_API_URL`, `ANYSEARCH_API_KEY`, `ANYSEARCH_TIMEOUT_SECONDS` | [AnySearch docs](https://www.anysearch.com/docs) | [AnySearch API keys](https://www.anysearch.com/console/api-keys) |
 
+Intent router configuration:
+
+| Key | Purpose |
+| --- | --- |
+| `SMART_SEARCH_INTENT_ROUTER` | `hybrid`, `rules`, or `off`; default `hybrid` |
+| `INTENT_EMBEDDING_API_URL` | Optional OpenAI-compatible embeddings endpoint for semantic capability routing |
+| `INTENT_EMBEDDING_API_KEY` | Optional embeddings API key; masked by `doctor` and config output |
+| `INTENT_EMBEDDING_MODEL` | Embeddings model name |
+| `INTENT_CLASSIFIER_API_URL` | Optional OpenAI-compatible chat-completions endpoint for structured intent classification |
+| `INTENT_CLASSIFIER_API_KEY` | Optional classifier API key; masked by `doctor` and config output |
+| `INTENT_CLASSIFIER_MODEL` | Classifier model name |
+| `INTENT_ROUTER_TIMEOUT_SECONDS` | Timeout for optional remote router calls, default `8` |
+
+Default `hybrid` is fail-open: if embeddings or classifier settings are missing or fail, routing records `degraded_reason` and falls back to local rules. The classifier may add capabilities, but unknown capability names and provider names are ignored. Providers are still selected only by capability.
+
 Important boundaries:
 
 - xAI official live search uses the Responses API `/responses` route through `XAI_*`. Compatible relays and gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
@@ -247,6 +284,7 @@ Important boundaries:
 - `TAVILY_API_URL` affects Tavily only. It does not proxy Zhipu. For Tavily Hikari / pooled endpoints, use `https://<host>/api/tavily`; setup normalizes root-host or `/mcp` inputs to that REST base.
 - `FIRECRAWL_API_URL` defaults to `https://api.firecrawl.dev/v2`.
 - AnySearch uses JSON-RPC 2.0 `tools/call` at `https://api.anysearch.com/mcp` by default. It allows anonymous calls when no key is configured, but authenticated calls send `Authorization: Bearer ...`. HTTP 200 responses with `result.isError=true` are treated as provider errors, not as successful evidence.
+- `doctor` reports intent router status as configured/not configured, model names, timeout, and degradation behavior. It does not expose router API keys.
 
 Non-interactive setup example:
 
@@ -313,6 +351,7 @@ Provider timeouts:
 | Command | Alias | Purpose |
 | --- | --- | --- |
 | `search` | `s` | Fast live search and broad synthesis |
+| `route` | `rt` | Explain required capabilities without running providers |
 | `deep` | `dr` | Offline Deep Research plan |
 | `research` | `rs` | Live Deep Research execution |
 | `fetch` | `f` | Fetch one URL as JSON, Markdown, or content |
@@ -343,6 +382,7 @@ Useful examples:
 
 ```powershell
 smart-search search "query" --validation balanced --extra-sources 3 --timeout 90 --format json --output result.json
+smart-search route "React useEffect API docs" --format markdown
 smart-search research "query" --budget deep --fallback auto --format json --output research.json
 smart-search search "query" --stream --format json
 smart-search search "query" --no-stream --format json

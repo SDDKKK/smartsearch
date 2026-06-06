@@ -20,6 +20,14 @@ def _reset_config(monkeypatch, tmp_path):
         "OPENAI_COMPATIBLE_API_KEY",
         "OPENAI_COMPATIBLE_MODEL",
         "OPENAI_COMPATIBLE_STREAM",
+        "SMART_SEARCH_INTENT_ROUTER",
+        "INTENT_EMBEDDING_API_URL",
+        "INTENT_EMBEDDING_API_KEY",
+        "INTENT_EMBEDDING_MODEL",
+        "INTENT_CLASSIFIER_API_URL",
+        "INTENT_CLASSIFIER_API_KEY",
+        "INTENT_CLASSIFIER_MODEL",
+        "INTENT_ROUTER_TIMEOUT_SECONDS",
         "EXA_API_KEY",
         "EXA_BASE_URL",
         "ANYSEARCH_API_KEY",
@@ -112,6 +120,53 @@ def test_openai_compatible_stream_config_defaults_and_boolean_styles(monkeypatch
 
     monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "false")
     assert service.config.openai_compatible_stream is False
+
+
+def test_intent_router_config_defaults_and_saved_values(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    assert service.config.intent_router_mode == "hybrid"
+    assert service.config.intent_embedding_api_url == ""
+    assert service.config.intent_embedding_api_key is None
+    assert service.config.intent_embedding_model == ""
+    assert service.config.intent_classifier_api_url == ""
+    assert service.config.intent_classifier_api_key is None
+    assert service.config.intent_classifier_model == ""
+    assert service.config.intent_router_timeout == 8.0
+
+    service.config_set("SMART_SEARCH_INTENT_ROUTER", "rules")
+    service.config_set("INTENT_EMBEDDING_API_URL", "https://embed.example.com/v1/embeddings")
+    service.config_set("INTENT_EMBEDDING_API_KEY", "embed-secret")
+    service.config_set("INTENT_EMBEDDING_MODEL", "embed-model")
+    service.config_set("INTENT_CLASSIFIER_API_URL", "https://classifier.example.com/v1/chat/completions")
+    service.config_set("INTENT_CLASSIFIER_API_KEY", "classifier-secret")
+    service.config_set("INTENT_CLASSIFIER_MODEL", "intent-mini")
+    service.config_set("INTENT_ROUTER_TIMEOUT_SECONDS", "3.5")
+
+    assert service.config.intent_router_mode == "rules"
+    assert service.config.intent_embedding_api_url == "https://embed.example.com/v1/embeddings"
+    assert service.config.intent_embedding_api_key == "embed-secret"
+    assert service.config.intent_embedding_model == "embed-model"
+    assert service.config.intent_classifier_api_url == "https://classifier.example.com/v1/chat/completions"
+    assert service.config.intent_classifier_api_key == "classifier-secret"
+    assert service.config.intent_classifier_model == "intent-mini"
+    assert service.config.intent_router_timeout == 3.5
+    saved = service.config_list()["values"]
+    assert saved["INTENT_EMBEDDING_API_KEY"] != "embed-secret"
+    assert saved["INTENT_CLASSIFIER_API_KEY"] != "classifier-secret"
+
+
+def test_intent_router_invalid_timeout_is_reported_in_config_info(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("INTENT_ROUTER_TIMEOUT_SECONDS", "slow")
+
+    info = service.config.get_config_info()
+    status = service.intent_router_status()
+
+    assert info["INTENT_ROUTER_TIMEOUT_SECONDS"] == 8.0
+    assert any("Invalid INTENT_ROUTER_TIMEOUT_SECONDS" in error for error in info["config_parameter_errors"])
+    assert status["ok"] is False
+    assert "Invalid INTENT_ROUTER_TIMEOUT_SECONDS" in status["error"]
 
 
 def test_anysearch_config_defaults_and_saved_values(monkeypatch, tmp_path):
@@ -992,6 +1047,37 @@ async def test_strict_still_uses_web_search_without_current_keyword(monkeypatch)
     assert result["routing_decision"]["web_current_intent"] is False
     assert "web_search" in result["routing_decision"]["supplemental_paths"]
     assert any(attempt["capability"] == "web_search" and attempt["status"] == "ok" for attempt in result["provider_attempts"])
+
+
+@pytest.mark.asyncio
+async def test_search_vertical_intent_uses_anysearch_when_configured(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("ANYSEARCH_API_KEY", "as-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "CVE answer."
+
+    async def fake_anysearch(query, domain="", sub_domain="", max_results=5):
+        return {
+            "ok": True,
+            "provider": "anysearch",
+            "tool": "search",
+            "results": [{"url": "https://cve.example.com/openssl", "title": "OpenSSL CVE", "description": "impact"}],
+        }
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "anysearch_search", fake_anysearch)
+
+    result = await service.search("CVE-2026 OpenSSL 漏洞影响范围", validation="balanced")
+
+    assert result["ok"] is True
+    assert "vertical_search" in result["routing_decision"]["required_capabilities"]
+    assert "vertical_search" in result["routing_decision"]["supplemental_paths"]
+    assert any(attempt["capability"] == "vertical_search" and attempt["provider"] == "anysearch" and attempt["status"] == "ok" for attempt in result["provider_attempts"])
+    assert any(source["provider"] == "anysearch" for source in result["extra_sources"])
 
 
 @pytest.mark.asyncio

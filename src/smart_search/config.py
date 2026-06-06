@@ -15,10 +15,13 @@ class Config:
     _DEFAULT_VALIDATION_LEVEL = "balanced"
     _DEFAULT_FALLBACK_MODE = "auto"
     _DEFAULT_MINIMUM_PROFILE = "standard"
+    _DEFAULT_INTENT_ROUTER_MODE = "hybrid"
+    _DEFAULT_INTENT_ROUTER_TIMEOUT_SECONDS = "8"
     _ALLOWED_XAI_TOOLS = {"web_search", "x_search"}
     _ALLOWED_VALIDATION_LEVELS = {"fast", "balanced", "strict"}
     _ALLOWED_FALLBACK_MODES = {"auto", "off"}
     _ALLOWED_MINIMUM_PROFILES = {"standard", "off"}
+    _ALLOWED_INTENT_ROUTER_MODES = {"hybrid", "rules", "off"}
     _CONFIG_KEYS = {
         "XAI_API_URL",
         "XAI_API_KEY",
@@ -33,6 +36,14 @@ class Config:
         "SMART_SEARCH_MINIMUM_PROFILE",
         "SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS",
         "SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS",
+        "SMART_SEARCH_INTENT_ROUTER",
+        "INTENT_EMBEDDING_API_URL",
+        "INTENT_EMBEDDING_API_KEY",
+        "INTENT_EMBEDDING_MODEL",
+        "INTENT_CLASSIFIER_API_URL",
+        "INTENT_CLASSIFIER_API_KEY",
+        "INTENT_CLASSIFIER_MODEL",
+        "INTENT_ROUTER_TIMEOUT_SECONDS",
         "EXA_API_KEY",
         "EXA_BASE_URL",
         "EXA_TIMEOUT_SECONDS",
@@ -233,6 +244,7 @@ class Config:
             "SMART_SEARCH_VALIDATION_LEVEL",
             "SMART_SEARCH_FALLBACK_MODE",
             "SMART_SEARCH_MINIMUM_PROFILE",
+            "SMART_SEARCH_INTENT_ROUTER",
         }:
             self._cached_model = None
 
@@ -258,6 +270,7 @@ class Config:
             "SMART_SEARCH_VALIDATION_LEVEL",
             "SMART_SEARCH_FALLBACK_MODE",
             "SMART_SEARCH_MINIMUM_PROFILE",
+            "SMART_SEARCH_INTENT_ROUTER",
         }:
             self._cached_model = None
 
@@ -359,6 +372,19 @@ class Config:
             return value, f"Invalid {key}: {value}. Supported values: {allowed_text}"
         return value, ""
 
+    def _float_value(self, key: str, default: str) -> float:
+        value = self._get_config_value(key, default) or default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid {key}: {value}. Expected a number.")
+
+    def _float_info(self, key: str, default: str) -> tuple[float, str]:
+        try:
+            return self._float_value(key, default), ""
+        except ValueError as e:
+            return float(default), str(e)
+
     @property
     def validation_level(self) -> str:
         return self._validated_enum(
@@ -382,6 +408,42 @@ class Config:
             self._DEFAULT_MINIMUM_PROFILE,
             self._ALLOWED_MINIMUM_PROFILES,
         )
+
+    @property
+    def intent_router_mode(self) -> str:
+        return self._validated_enum(
+            "SMART_SEARCH_INTENT_ROUTER",
+            self._DEFAULT_INTENT_ROUTER_MODE,
+            self._ALLOWED_INTENT_ROUTER_MODES,
+        )
+
+    @property
+    def intent_embedding_api_url(self) -> str:
+        return self._get_config_value("INTENT_EMBEDDING_API_URL", "") or ""
+
+    @property
+    def intent_embedding_api_key(self) -> str | None:
+        return self._get_config_value("INTENT_EMBEDDING_API_KEY")
+
+    @property
+    def intent_embedding_model(self) -> str:
+        return self._get_config_value("INTENT_EMBEDDING_MODEL", "") or ""
+
+    @property
+    def intent_classifier_api_url(self) -> str:
+        return self._get_config_value("INTENT_CLASSIFIER_API_URL", "") or ""
+
+    @property
+    def intent_classifier_api_key(self) -> str | None:
+        return self._get_config_value("INTENT_CLASSIFIER_API_KEY")
+
+    @property
+    def intent_classifier_model(self) -> str:
+        return self._get_config_value("INTENT_CLASSIFIER_MODEL", "") or ""
+
+    @property
+    def intent_router_timeout(self) -> float:
+        return self._float_value("INTENT_ROUTER_TIMEOUT_SECONDS", self._DEFAULT_INTENT_ROUTER_TIMEOUT_SECONDS)
 
     def _csv_values(self, key: str) -> list[str]:
         raw = self._get_config_value(key, "") or ""
@@ -599,7 +661,16 @@ class Config:
             self._DEFAULT_MINIMUM_PROFILE,
             self._ALLOWED_MINIMUM_PROFILES,
         )
-        config_parameter_errors.extend(error for error in (validation_error, fallback_error, minimum_error) if error)
+        intent_router_mode, intent_router_error = self._enum_info(
+            "SMART_SEARCH_INTENT_ROUTER",
+            self._DEFAULT_INTENT_ROUTER_MODE,
+            self._ALLOWED_INTENT_ROUTER_MODES,
+        )
+        intent_router_timeout, intent_router_timeout_error = self._float_info(
+            "INTENT_ROUTER_TIMEOUT_SECONDS",
+            self._DEFAULT_INTENT_ROUTER_TIMEOUT_SECONDS,
+        )
+        config_parameter_errors.extend(error for error in (validation_error, fallback_error, minimum_error, intent_router_error, intent_router_timeout_error) if error)
         if config_parameter_errors and config_status.startswith("ok:"):
             config_status = f"config_error: {'; '.join(config_parameter_errors)}"
 
@@ -617,6 +688,14 @@ class Config:
             "SMART_SEARCH_MINIMUM_PROFILE": minimum_profile,
             "SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS": ",".join(self.research_preferred_providers),
             "SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS": ",".join(self.research_disabled_providers),
+            "SMART_SEARCH_INTENT_ROUTER": intent_router_mode,
+            "INTENT_EMBEDDING_API_URL": self.intent_embedding_api_url or "未配置",
+            "INTENT_EMBEDDING_API_KEY": self._mask_api_key(self.intent_embedding_api_key) if self.intent_embedding_api_key else "未配置",
+            "INTENT_EMBEDDING_MODEL": self.intent_embedding_model or "未配置",
+            "INTENT_CLASSIFIER_API_URL": self.intent_classifier_api_url or "未配置",
+            "INTENT_CLASSIFIER_API_KEY": self._mask_api_key(self.intent_classifier_api_key) if self.intent_classifier_api_key else "未配置",
+            "INTENT_CLASSIFIER_MODEL": self.intent_classifier_model or "未配置",
+            "INTENT_ROUTER_TIMEOUT_SECONDS": intent_router_timeout,
             "SMART_SEARCH_DEBUG": self.debug_enabled,
             "SMART_SEARCH_LOG_LEVEL": self.log_level,
             "SMART_SEARCH_LOG_DIR": self.log_dir_config_value,

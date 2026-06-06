@@ -88,6 +88,13 @@ def test_deep_research_skill_contract_public_and_packaged_assets_match():
         "does not depend on an MCP session",
         "SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS",
         "provider advantage routing",
+        "smart-search route",
+        "Intent Routing Diagnostics",
+        "SMART_SEARCH_INTENT_ROUTER=hybrid|rules|off",
+        "INTENT_EMBEDDING_API_URL",
+        "INTENT_CLASSIFIER_API_URL",
+        "required_capabilities",
+        "Classifier output cannot select providers",
     ]
     for marker in required_markers:
         assert marker in public_text
@@ -134,6 +141,15 @@ def test_deep_research_cli_contract_documents_plan_and_smoke_matrix():
         "Even `--budget quick` plans must retain at least one `fetch` step",
         "`steps[].command` and `steps[].output_path` are one contract",
         "Prefer PowerShell-safe quoted commands",
+        "`smart-search route QUERY",
+        "Route diagnostic output includes",
+        "`intent_router_mode`",
+        "`required_capabilities`",
+        "`SMART_SEARCH_INTENT_ROUTER` accepts `hybrid`, `rules`, and `off`",
+        "`INTENT_EMBEDDING_API_URL`",
+        "`INTENT_CLASSIFIER_API_URL`",
+        "`INTENT_ROUTER_TIMEOUT_SECONDS` defaults to `8`",
+        "`deep` remains an offline planner",
     ]
     for marker in required_markers:
         assert marker in public_contract
@@ -196,6 +212,10 @@ def test_deep_research_readme_documents_capability_orchestration():
         "smart-search skills status",
         "smart-search skills update",
         "`doctor` is preflight, not a research step",
+        "smart-search route",
+        "`intent_router_mode`",
+        "`required_capabilities`",
+        "degraded_reason",
         "Unsupported key claims must be fetched or downgraded to unverified candidates",
     ]
     chinese_markers = [
@@ -214,6 +234,10 @@ def test_deep_research_readme_documents_capability_orchestration():
         "smart-search skills status",
         "smart-search skills update",
         "`doctor` 只是配置预检",
+        "smart-search route",
+        "`intent_router_mode`",
+        "`required_capabilities`",
+        "degraded_reason",
         "没有 fetch 的来源标为未验证候选",
     ]
     for marker in english_markers:

@@ -10,6 +10,16 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import config
+from .intent_router import (
+    CURRENT_INTENT_KEYWORDS as ROUTER_CURRENT_INTENT_KEYWORDS,
+    DOCS_INTENT_KEYWORDS as ROUTER_DOCS_INTENT_KEYWORDS,
+    FETCH_INTENT_KEYWORDS as ROUTER_FETCH_INTENT_KEYWORDS,
+    VERTICAL_INTENT_KEYWORDS as ROUTER_VERTICAL_INTENT_KEYWORDS,
+    IntentRouteResult,
+    IntentRouter,
+    build_rules_route,
+    extract_urls as router_extract_urls,
+)
 from .logger import log_info
 from .providers.anysearch import AnySearchProvider
 from .providers.context7 import Context7Provider
@@ -33,52 +43,9 @@ MINIMUM_PROFILE_ERROR = (
     "最低配置不满足：必须至少配置 main_search、docs_search、web_fetch 三类能力各一个 provider。"
 )
 OPENAI_COMPATIBLE_DIAGNOSE_COMMAND = "smart-search diagnose openai-compatible --format markdown"
-DOCS_INTENT_KEYWORDS = {
-    "api",
-    "sdk",
-    "library",
-    "framework",
-    "docs",
-    "documentation",
-    "reference",
-    "react",
-    "next.js",
-    "vue",
-    "python",
-    "prisma",
-    "langchain",
-    "openai",
-    "context7",
-    "接口",
-    "文档",
-    "库",
-    "框架",
-    "函数",
-    "参数",
-    "配置",
-}
-ZH_CURRENT_KEYWORDS = {
-    "今天",
-    "最新",
-    "国内",
-    "中国",
-    "政策",
-    "新闻",
-    "实时",
-    "刚刚",
-    "本周",
-    "本月",
-    "战报",
-    "比分",
-    "赛程",
-    "赛果",
-    "季后赛",
-    "比赛",
-    "nba",
-    "足球",
-    "篮球",
-}
-FETCH_INTENT_KEYWORDS = {"http://", "https://"}
+DOCS_INTENT_KEYWORDS = ROUTER_DOCS_INTENT_KEYWORDS
+ZH_CURRENT_KEYWORDS = ROUTER_CURRENT_INTENT_KEYWORDS
+FETCH_INTENT_KEYWORDS = ROUTER_FETCH_INTENT_KEYWORDS
 DEEP_ALLOWED_TOOLS = {
     "search",
     "exa-search",
@@ -164,35 +131,7 @@ DEEP_EXA_DISCOVERY_KEYWORDS = {
     "standards",
 }
 RESEARCH_ROUTE_POLICY_VERSION = "research-router-v1"
-RESEARCH_VERTICAL_KEYWORDS = {
-    "cve",
-    "vulnerability",
-    "vulnerabilities",
-    "安全漏洞",
-    "漏洞",
-    "finance",
-    "financial",
-    "股票",
-    "基金",
-    "财报",
-    "法律",
-    "法规",
-    "legal",
-    "law",
-    "academic",
-    "论文",
-    "paper",
-    "repo",
-    "repository",
-    "github",
-    "gitlab",
-    "codebase",
-    "code search",
-    "code docs",
-    "代码",
-    "代码库",
-    "开源仓库",
-}
+RESEARCH_VERTICAL_KEYWORDS = ROUTER_VERTICAL_INTENT_KEYWORDS
 RESEARCH_JS_HEAVY_KEYWORDS = {
     "js-heavy",
     "javascript",
@@ -463,6 +402,10 @@ def provider_profiles() -> dict[str, dict[str, Any]]:
     return {provider: dict(profile) for provider, profile in PROVIDER_PROFILES.items()}
 
 
+def intent_router_status() -> dict[str, Any]:
+    return IntentRouter(config).status()
+
+
 def _provider_supports_capability(provider: str, capability: str) -> bool:
     profile = PROVIDER_PROFILES.get(provider, {})
     capabilities = set(profile.get("capabilities") or [profile.get("capability", "")])
@@ -554,17 +497,16 @@ def _research_fetch_order(query: str, url: str = "", capability_status: dict[str
 
 def _research_route_signals(question: str, plan: dict[str, Any]) -> dict[str, Any]:
     intent = plan.get("intent_signals") or {}
+    rules_route = build_rules_route(question, plan_intent_signals=intent, mode="rules")
     text = question.lower()
     return {
-        "docs_api_intent": bool(intent.get("docs_api_intent")) or _is_docs_intent(question),
+        "docs_api_intent": rules_route.docs_intent,
         "official_low_noise_intent": _contains_any(question, DEEP_EXA_DISCOVERY_KEYWORDS),
-        "current_or_locale_intent": intent.get("recency_requirement") in {"recent", "current"}
-        or intent.get("locale_domain_scope") == "china"
-        or _is_zh_current_intent(question),
-        "known_url": bool(intent.get("known_url")) or bool(_extract_urls(question)),
+        "current_or_locale_intent": rules_route.web_current_intent,
+        "known_url": rules_route.fetch_intent,
         "pdf_or_arxiv_intent": _contains_any(question, RESEARCH_PDF_KEYWORDS),
         "js_heavy_intent": _contains_any(question, RESEARCH_JS_HEAVY_KEYWORDS),
-        "vertical_intent": _contains_any(question, RESEARCH_VERTICAL_KEYWORDS),
+        "vertical_intent": bool(rules_route.intent_signals.get("vertical_intent")),
         "claim_risk": intent.get("claim_risk", "medium"),
         "cross_validation_need": intent.get("cross_validation_need", "normal"),
         "raw_query": text,
@@ -576,8 +518,14 @@ def _research_capability_routes(
     plan: dict[str, Any],
     fallback: str,
     capability_status: dict[str, Any] | None = None,
+    route_result: IntentRouteResult | None = None,
 ) -> dict[str, Any]:
     signals = _research_route_signals(question, plan)
+    if route_result is not None:
+        signals["docs_api_intent"] = route_result.docs_intent
+        signals["current_or_locale_intent"] = route_result.web_current_intent
+        signals["known_url"] = route_result.fetch_intent
+        signals["vertical_intent"] = bool(route_result.intent_signals.get("vertical_intent") or "vertical_search" in route_result.required_capabilities)
     _, _, invalid_overrides = _safe_provider_overrides()
     routes: dict[str, Any] = {
         "signals": signals,
@@ -586,6 +534,19 @@ def _research_capability_routes(
         "invalid_provider_overrides": invalid_overrides,
         "capabilities": {},
     }
+    if route_result is not None:
+        route_data = route_result.to_dict()
+        for key in (
+            "intent_router_mode",
+            "required_capabilities",
+            "intent_signals",
+            "confidence",
+            "router_engines_used",
+            "degraded",
+            "degraded_reason",
+            "reasons",
+        ):
+            routes[key] = route_data.get(key)
 
     web_search = _configured_for_capability("web_search", capability_status)
     if signals["current_or_locale_intent"]:
@@ -712,18 +673,19 @@ def _write_research_artifact(evidence_root: str, name: str, data: Any) -> None:
 
 
 def _is_docs_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in DOCS_INTENT_KEYWORDS)
+    return build_rules_route(query, mode="rules").docs_intent
 
 
 def _is_zh_current_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in ZH_CURRENT_KEYWORDS)
+    return build_rules_route(query, mode="rules").zh_current_intent
+
+
+def _is_web_current_intent(query: str) -> bool:
+    return build_rules_route(query, mode="rules").web_current_intent
 
 
 def _is_fetch_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in FETCH_INTENT_KEYWORDS)
+    return build_rules_route(query, mode="rules").fetch_intent
 
 
 def _contains_any(query: str, keywords: set[str]) -> bool:
@@ -732,12 +694,7 @@ def _contains_any(query: str, keywords: set[str]) -> bool:
 
 
 def _extract_urls(query: str) -> list[str]:
-    urls = []
-    for match in re.findall(r"https?://[^\s<>\]\)\"']+", query):
-        cleaned = match.rstrip(".,;，。；)")
-        if cleaned:
-            urls.append(cleaned)
-    return urls
+    return router_extract_urls(query)
 
 
 def _slugify_query(query: str) -> str:
@@ -1116,7 +1073,24 @@ async def research(
 
     plan = build_deep_research_plan(question, budget=_deep_budget(budget or "deep"), evidence_dir=evidence_dir)
     evidence_root = plan.get("evidence_dir") or _default_evidence_dir(question)
-    routes = _research_capability_routes(question, plan, fallback_mode)
+    try:
+        route_result = await IntentRouter(config).route(
+            question,
+            validation_level="balanced",
+            allow_remote=True,
+            plan_intent_signals=plan.get("intent_signals") or {},
+        )
+    except ValueError as e:
+        return {
+            "ok": False,
+            "error_type": "parameter_error",
+            "error": str(e),
+            "question": question,
+            "mode": "deep_research_execution",
+            "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+            "elapsed_ms": _elapsed_ms(start),
+        }
+    routes = _research_capability_routes(question, plan, fallback_mode, route_result=route_result)
     provider_attempts: list[dict[str, Any]] = []
     discovery_sources: list[dict[str, Any]] = []
     evidence_items: list[dict[str, Any]] = []
@@ -1721,6 +1695,37 @@ async def _run_docs_search_fallback(
     return [], attempts
 
 
+async def _run_vertical_search_fallback(
+    query: str,
+    providers: str = "auto",
+    fallback: str = "auto",
+) -> tuple[list[dict], list[dict]]:
+    provider_filter = _parse_provider_filter(providers)
+    attempts: list[dict] = []
+    configured: list[str] = []
+    if config.anysearch_api_key:
+        configured.append("anysearch")
+    if provider_filter is not None:
+        configured = [p for p in configured if p in provider_filter]
+    if fallback == "off":
+        configured = configured[:1]
+
+    for provider in configured:
+        start = time.time()
+        try:
+            data = await anysearch_search(query, max_results=5)
+            if data.get("ok"):
+                sources = _normalize_source_results(data.get("results"), "anysearch")
+                if sources:
+                    attempts.append(_attempt("vertical_search", provider, "ok", start, result_count=len(sources)))
+                    return sources, attempts
+            status = "error" if data.get("error_type") in {"auth_error", "provider_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+            attempts.append(_attempt("vertical_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+        except Exception as e:
+            attempts.append(_attempt("vertical_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+    return [], attempts
+
+
 async def call_tavily_extract(url: str) -> str | None:
     api_key = config.tavily_api_key
     if not api_key:
@@ -1951,25 +1956,15 @@ async def search(
         elif has_firecrawl:
             firecrawl_count = extra_sources
 
-    docs_intent = _is_docs_intent(query)
-    zh_current_intent = _is_zh_current_intent(query)
-    web_current_intent = zh_current_intent
-    fetch_urls = _extract_urls(query)
-    fetch_intent = bool(fetch_urls) or _is_fetch_intent(query)
-    supplemental_paths: list[str] = []
-    if docs_intent:
-        supplemental_paths.append("docs_search")
-    if web_current_intent or validation_level == "strict":
-        supplemental_paths.append("web_search")
-    if fetch_intent:
-        supplemental_paths.append("web_fetch")
     selected_main_provider_configs = main_provider_configs if fallback_mode != "off" else main_provider_configs[:1]
+    try:
+        route_result = await IntentRouter(config).route(query, validation_level=validation_level, allow_remote=True)
+    except ValueError as e:
+        return _empty_search_result(start, session_id, query, "parameter_error", str(e), extra={"validation_level": validation_level})
+    fetch_urls = _extract_urls(query)
+    supplemental_paths = route_result.required_capabilities
     routing_decision = {
-        "docs_intent": docs_intent,
-        "zh_current_intent": zh_current_intent,
-        "web_current_intent": web_current_intent,
-        "fetch_intent": fetch_intent,
-        "supplemental_paths": supplemental_paths,
+        **route_result.to_dict(),
         "validation_level": validation_level,
         "fallback_mode": fallback_mode,
         "providers": providers,
@@ -2054,20 +2049,24 @@ async def search(
 
     supplemental_sources: list[dict] = []
     if validation_level in {"balanced", "strict"}:
-        if docs_intent:
+        if "docs_search" in supplemental_paths:
             docs_sources, docs_attempts = await _run_docs_search_fallback(query, providers=providers, fallback=fallback_mode)
             provider_attempts.extend(docs_attempts)
             supplemental_sources.extend(docs_sources)
-        if web_current_intent or validation_level == "strict":
+        if "web_search" in supplemental_paths:
             web_sources, web_attempts = await _run_web_search_fallback(query, count=max(1, extra_sources or 3), providers=providers, fallback=fallback_mode)
             provider_attempts.extend(web_attempts)
             supplemental_sources.extend(web_sources)
-        if fetch_intent:
+        if "web_fetch" in supplemental_paths:
             fetch_url = fetch_urls[0] if fetch_urls else query.strip()
             fetch_result, fetch_attempts = await _run_web_fetch_fallback(fetch_url, fallback=fallback_mode)
             provider_attempts.extend(fetch_attempts)
             if fetch_result:
                 supplemental_sources.append({"url": fetch_result["url"], "provider": fetch_result["provider"], "description": fetch_result["content"][:300]})
+        if "vertical_search" in supplemental_paths:
+            vertical_sources, vertical_attempts = await _run_vertical_search_fallback(query, providers=providers, fallback=fallback_mode)
+            provider_attempts.extend(vertical_attempts)
+            supplemental_sources.extend(vertical_sources)
 
     extra_source_items = merge_sources(extra_source_items, supplemental_sources)
     sources = merge_sources(primary_sources, extra_source_items)
@@ -2100,6 +2099,45 @@ async def search(
         "capability_status": minimum.get("capability_status", {}),
         "elapsed_ms": _elapsed_ms(start),
     }
+
+
+async def route(
+    query: str,
+    validation: str = "",
+    mode: str = "",
+    allow_remote: bool = True,
+) -> dict[str, Any]:
+    start = time.time()
+    try:
+        validation_level = (validation or config.validation_level).strip().lower()
+        if validation_level not in config._ALLOWED_VALIDATION_LEVELS:
+            raise ValueError(f"Invalid validation level: {validation_level}")
+        route_result = await IntentRouter(config).route(
+            query,
+            validation_level=validation_level,
+            mode=mode,
+            allow_remote=allow_remote,
+        )
+    except ValueError as e:
+        return {
+            "ok": False,
+            "query": query,
+            "error_type": "parameter_error",
+            "error": str(e),
+            "elapsed_ms": _elapsed_ms(start),
+        }
+    data = route_result.to_dict()
+    data.update(
+        {
+            "ok": True,
+            "query": query,
+            "validation_level": validation_level,
+            "executed_search": False,
+            "provider_selection": "not_executed",
+            "elapsed_ms": _elapsed_ms(start),
+        }
+    )
+    return data
 
 
 def _primary_search_exception_result(
@@ -2985,6 +3023,7 @@ async def doctor() -> dict[str, Any]:
     info["capability_status"] = minimum.get("capability_status", get_capability_status())
     info["minimum_profile_ok"] = minimum.get("ok", False)
     info["minimum_profile_missing"] = minimum.get("missing", [])
+    info["intent_router_status"] = intent_router_status()
     main_connection_tests = info.get("main_search_connection_tests") or {}
     main_search_statuses = [item.get("status") for item in main_connection_tests.values() if isinstance(item, dict)]
     primary_test = info.get("primary_connection_test", {})
@@ -3152,28 +3191,28 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
     general_route = {
         "docs_intent": _is_docs_intent("today AI news"),
         "zh_current_intent": _is_zh_current_intent("today AI news"),
-        "web_current_intent": _is_zh_current_intent("today AI news"),
+        "web_current_intent": _is_web_current_intent("today AI news"),
         "supplemental_paths": [],
     }
     cases.append(_case("search balanced avoids context7 for general query", not general_route["docs_intent"], {"routing_decision": general_route}))
 
     docs_route = {
         "docs_intent": _is_docs_intent("React useEffect API docs"),
-        "web_current_intent": _is_zh_current_intent("React useEffect API docs"),
+        "web_current_intent": _is_web_current_intent("React useEffect API docs"),
         "supplemental_paths": ["docs_search"],
     }
     cases.append(_case("search docs intent uses docs route", docs_route["docs_intent"], {"routing_decision": docs_route}))
 
     zh_route = {
         "zh_current_intent": _is_zh_current_intent("今天国内 AI 新闻"),
-        "web_current_intent": _is_zh_current_intent("今天国内 AI 新闻"),
+        "web_current_intent": _is_web_current_intent("今天国内 AI 新闻"),
         "supplemental_paths": ["web_search"],
     }
     cases.append(_case("search zh current intent uses zhipu reinforcement", zh_route["zh_current_intent"], {"routing_decision": zh_route}))
 
     sports_route = {
         "zh_current_intent": _is_zh_current_intent("nba战报"),
-        "web_current_intent": _is_zh_current_intent("nba战报"),
+        "web_current_intent": _is_web_current_intent("nba战报"),
         "supplemental_paths": ["web_search"],
     }
     cases.append(_case("search sports current intent uses web reinforcement", sports_route["web_current_intent"], {"routing_decision": sports_route}))
