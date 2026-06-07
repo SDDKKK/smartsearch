@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -9,13 +10,35 @@ from urllib.parse import urlparse
 import httpx
 
 from .config import config
+from .intent_router import (
+    CAPABILITY_UTTERANCES,
+    CURRENT_INTENT_KEYWORDS as ROUTER_CURRENT_INTENT_KEYWORDS,
+    DEFAULT_ROUTE_CALIBRATION_MODELS,
+    DEFAULT_SEMANTIC_CONFIDENCE_MARGIN,
+    DEFAULT_SEMANTIC_CONFIDENCE_THRESHOLD,
+    DOCS_INTENT_KEYWORDS as ROUTER_DOCS_INTENT_KEYWORDS,
+    FETCH_INTENT_KEYWORDS as ROUTER_FETCH_INTENT_KEYWORDS,
+    ROUTABLE_CAPABILITIES,
+    ROUTE_CALIBRATION_QUERIES,
+    VERTICAL_INTENT_KEYWORDS as ROUTER_VERTICAL_INTENT_KEYWORDS,
+    IntentRouteResult,
+    IntentRouter,
+    build_rules_route,
+    extract_urls as router_extract_urls,
+    _classifier_can_add_capability,
+    _cosine_similarity,
+    _ordered_capabilities,
+    _semantic_summary,
+)
 from .logger import log_info
 from .providers.anysearch import AnySearchProvider
 from .providers.context7 import Context7Provider
 from .providers.exa import ExaSearchProvider
+from .providers.jina import JinaReaderProvider
 from .providers.openai_compatible import OpenAICompatibleSearchProvider, get_local_time_info
 from .providers.xai_responses import XAIResponsesSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
+from .providers.zhipu_mcp import ZhipuMCPProvider
 from .sources import merge_sources, new_session_id, split_answer_and_sources
 from .utils import search_prompt
 
@@ -30,57 +53,19 @@ MINIMUM_PROFILE_ERROR = (
     "最低配置不满足：必须至少配置 main_search、docs_search、web_fetch 三类能力各一个 provider。"
 )
 OPENAI_COMPATIBLE_DIAGNOSE_COMMAND = "smart-search diagnose openai-compatible --format markdown"
-DOCS_INTENT_KEYWORDS = {
-    "api",
-    "sdk",
-    "library",
-    "framework",
-    "docs",
-    "documentation",
-    "reference",
-    "react",
-    "next.js",
-    "vue",
-    "python",
-    "prisma",
-    "langchain",
-    "openai",
-    "context7",
-    "接口",
-    "文档",
-    "库",
-    "框架",
-    "函数",
-    "参数",
-    "配置",
-}
-ZH_CURRENT_KEYWORDS = {
-    "今天",
-    "最新",
-    "国内",
-    "中国",
-    "政策",
-    "新闻",
-    "实时",
-    "刚刚",
-    "本周",
-    "本月",
-    "战报",
-    "比分",
-    "赛程",
-    "赛果",
-    "季后赛",
-    "比赛",
-    "nba",
-    "足球",
-    "篮球",
-}
-FETCH_INTENT_KEYWORDS = {"http://", "https://"}
+DOCS_INTENT_KEYWORDS = ROUTER_DOCS_INTENT_KEYWORDS
+ZH_CURRENT_KEYWORDS = ROUTER_CURRENT_INTENT_KEYWORDS
+FETCH_INTENT_KEYWORDS = ROUTER_FETCH_INTENT_KEYWORDS
 DEEP_ALLOWED_TOOLS = {
     "search",
     "exa-search",
     "exa-similar",
     "zhipu-search",
+    "zhipu-mcp-search",
+    "zhipu-mcp-reader",
+    "zhipu-mcp-search-doc",
+    "zhipu-mcp-repo-structure",
+    "zhipu-mcp-read-file",
     "context7-library",
     "context7-docs",
     "fetch",
@@ -154,6 +139,143 @@ DEEP_EXA_DISCOVERY_KEYWORDS = {
     "白皮书",
     "standard",
     "standards",
+}
+RESEARCH_ROUTE_POLICY_VERSION = "research-router-v1"
+RESEARCH_VERTICAL_KEYWORDS = ROUTER_VERTICAL_INTENT_KEYWORDS
+RESEARCH_JS_HEAVY_KEYWORDS = {
+    "js-heavy",
+    "javascript",
+    "dynamic",
+    "动态页面",
+    "浏览器渲染",
+    "登录页",
+    "cloudflare",
+    "screenshot",
+    "ocr",
+    "扫描",
+}
+RESEARCH_PDF_KEYWORDS = {"pdf", "arxiv", "论文", "paper", ".pdf"}
+RESEARCH_PROFILE_ORDER = {
+    "main_search": ["xai-responses", "openai-compatible"],
+    "web_search": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
+    "docs_search": ["context7", "exa"],
+    "web_fetch": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
+    "vertical_search": ["anysearch"],
+    "site_map": ["tavily"],
+    "synthesis": ["main-search"],
+}
+PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
+    "xai-responses": {
+        "capability": "main_search",
+        "strengths": ["broad synthesis", "web_search", "x_search"],
+        "exclusions": ["evidence proof without fetch"],
+        "fallback_group": "main_search",
+        "minimum_profile_role": "main_search",
+        "quality_filters": ["source extraction required for high-risk claims"],
+        "route_reasons": ["broad live answer", "primary synthesis"],
+    },
+    "openai-compatible": {
+        "capability": "main_search",
+        "strengths": ["broad synthesis", "relay compatibility"],
+        "exclusions": ["xAI server tools"],
+        "fallback_group": "main_search",
+        "minimum_profile_role": "main_search",
+        "quality_filters": ["source extraction required for high-risk claims"],
+        "route_reasons": ["relay-compatible primary synthesis"],
+    },
+    "context7": {
+        "capability": "docs_search",
+        "strengths": ["library docs", "API docs", "framework docs", "versioned snippets"],
+        "exclusions": ["general news", "generic web facts"],
+        "fallback_group": "docs_search",
+        "minimum_profile_role": "docs_search",
+        "quality_filters": ["library id required", "content required before citation"],
+        "route_reasons": ["docs/API evidence", "framework reference"],
+    },
+    "exa": {
+        "capability": "docs_search",
+        "strengths": ["official domains", "papers", "product pages", "trusted low-noise discovery", "similar pages"],
+        "exclusions": ["default second hop for every high-risk claim"],
+        "fallback_group": "docs_search",
+        "minimum_profile_role": "docs_search",
+        "quality_filters": ["URL required", "fetch before proof citation"],
+        "route_reasons": ["official low-noise discovery", "paper/product discovery"],
+    },
+    "zhipu": {
+        "capability": "web_search",
+        "strengths": ["Chinese", "domestic China", "current", "policy", "announcements", "recency filters"],
+        "exclusions": ["web_fetch", "chat model selection"],
+        "fallback_group": "web_search",
+        "minimum_profile_role": "",
+        "quality_filters": ["URL required", "fetch before proof citation"],
+        "route_reasons": ["Chinese/current/policy discovery"],
+    },
+    "zhipu-mcp": {
+        "capability": "web_search",
+        "strengths": ["Coding Plan quota", "remote MCP web_search_prime"],
+        "exclusions": ["Zhipu REST Web Search API"],
+        "fallback_group": "web_search",
+        "minimum_profile_role": "",
+        "quality_filters": ["URL required", "fetch before proof citation"],
+        "route_reasons": ["Coding Plan quota web discovery"],
+    },
+    "tavily": {
+        "capability": "web_search",
+        "capabilities": ["web_search", "web_fetch", "site_map"],
+        "strengths": ["broad source discovery", "site map", "URL extract"],
+        "exclusions": ["docs semantic replacement"],
+        "fallback_group": "web_search/web_fetch/site_map",
+        "minimum_profile_role": "web_fetch",
+        "quality_filters": ["non-empty normalized result", "non-empty extracted content"],
+        "route_reasons": ["broad source discovery", "site map", "URL fetch"],
+    },
+    "jina": {
+        "capability": "web_fetch",
+        "strengths": ["known public URL", "PDF", "arXiv", "clean markdown", "ReaderLM-v2 with key"],
+        "exclusions": ["general search provider", "anonymous standard minimum profile"],
+        "fallback_group": "web_fetch",
+        "minimum_profile_role": "web_fetch_with_key",
+        "quality_filters": ["non-empty markdown", "challenge page rejection", "ReaderLM-v2 requires key"],
+        "route_reasons": ["known URL extraction", "PDF/arXiv extraction"],
+    },
+    "zhipu-mcp-reader": {
+        "capability": "web_fetch",
+        "strengths": ["Coding Plan quota", "remote MCP webReader"],
+        "exclusions": ["Zhipu REST Web Search API"],
+        "fallback_group": "web_fetch",
+        "minimum_profile_role": "",
+        "quality_filters": ["non-empty reader content"],
+        "route_reasons": ["Coding Plan quota page read"],
+    },
+    "firecrawl": {
+        "capability": "web_fetch",
+        "capabilities": ["web_search", "web_fetch"],
+        "strengths": ["robust scrape fallback", "JS-heavy pages", "dynamic pages", "OCR/PDF/structured extraction"],
+        "exclusions": ["docs semantic replacement"],
+        "fallback_group": "web_search/web_fetch",
+        "minimum_profile_role": "web_fetch",
+        "quality_filters": ["non-empty normalized result", "non-empty extracted content"],
+        "route_reasons": ["JS-heavy fetch", "dynamic/browser-like extraction", "robust fetch fallback"],
+    },
+    "anysearch": {
+        "capability": "vertical_search",
+        "strengths": ["CVE", "finance", "legal", "academic", "code/docs", "structured vertical domains"],
+        "exclusions": ["generic default fallback", "standard minimum profile"],
+        "fallback_group": "vertical_search",
+        "minimum_profile_role": "",
+        "quality_filters": ["vertical intent required", "URL required before evidence citation"],
+        "route_reasons": ["vertical domain discovery"],
+        "experimental": True,
+    },
+    "main-search": {
+        "capability": "synthesis",
+        "strengths": ["evidence-only final synthesis"],
+        "exclusions": ["live source discovery during research synthesis"],
+        "fallback_group": "synthesis",
+        "minimum_profile_role": "",
+        "quality_filters": ["fetched evidence only", "no provider calls during synthesis"],
+        "route_reasons": ["evidence-only synthesis"],
+    },
 }
 MAIN_SEARCH_FALLBACK_CHAIN = ["xai-responses", "openai-compatible"]
 MAIN_SEARCH_PROVIDER_ALIASES = {
@@ -282,27 +404,314 @@ def _provider_names_from_attempts(attempts: list[dict]) -> list[str]:
 
 
 def _fallback_used(attempts: list[dict]) -> bool:
-    by_capability: dict[str, int] = {}
+    by_capability: dict[str, list[dict]] = {}
     for attempt in attempts:
         capability = attempt.get("capability", "")
         if attempt.get("status") in {"ok", "empty", "error"}:
-            by_capability[capability] = by_capability.get(capability, 0) + 1
-    return any(count > 1 for count in by_capability.values())
+            by_capability.setdefault(capability, []).append(attempt)
+    for capability_attempts in by_capability.values():
+        previous_failed = False
+        previous_provider = ""
+        for attempt in capability_attempts:
+            provider = attempt.get("provider", "")
+            status = attempt.get("status")
+            if previous_failed:
+                return True
+            if previous_provider and provider and provider != previous_provider:
+                return True
+            previous_failed = status in {"empty", "error"}
+            previous_provider = provider or previous_provider
+    return False
+
+
+def provider_profiles() -> dict[str, dict[str, Any]]:
+    return {provider: dict(profile) for provider, profile in PROVIDER_PROFILES.items()}
+
+
+def intent_router_status() -> dict[str, Any]:
+    return IntentRouter(config).status()
+
+
+def _provider_supports_capability(provider: str, capability: str) -> bool:
+    profile = PROVIDER_PROFILES.get(provider, {})
+    capabilities = set(profile.get("capabilities") or [profile.get("capability", "")])
+    return capability in capabilities
+
+
+def _provider_configured(provider: str) -> bool:
+    if provider == "xai-responses":
+        return bool(config.xai_api_key)
+    if provider == "openai-compatible":
+        return bool(config.openai_compatible_api_url and config.openai_compatible_api_key)
+    if provider == "context7":
+        return bool(config.context7_api_key)
+    if provider == "exa":
+        return bool(config.exa_api_key)
+    if provider == "zhipu":
+        return bool(config.zhipu_api_key)
+    if provider == "zhipu-mcp":
+        return bool(config.zhipu_mcp_api_key)
+    if provider == "tavily":
+        return bool(config.tavily_api_key)
+    if provider == "jina":
+        return bool(config.jina_api_key)
+    if provider == "zhipu-mcp-reader":
+        return bool(config.zhipu_mcp_api_key)
+    if provider == "firecrawl":
+        return bool(config.firecrawl_api_key)
+    if provider == "anysearch":
+        return bool(config.anysearch_api_key)
+    if provider == "main-search":
+        return bool(config.xai_api_key or (config.openai_compatible_api_url and config.openai_compatible_api_key))
+    return False
+
+
+def _configured_for_capability(capability: str, capability_status: dict[str, Any] | None = None) -> list[str]:
+    if capability_status is not None:
+        configured = set(capability_status.get(capability, {}).get("configured") or [])
+        return [
+            provider
+            for provider in RESEARCH_PROFILE_ORDER.get(capability, [])
+            if provider in configured and _provider_supports_capability(provider, capability)
+        ]
+    return [provider for provider in RESEARCH_PROFILE_ORDER.get(capability, []) if _provider_configured(provider)]
+
+
+def _safe_provider_overrides() -> tuple[list[str], list[str], list[str]]:
+    known = set(PROVIDER_PROFILES)
+    preferred = [provider for provider in config.research_preferred_providers if provider in known]
+    disabled = [provider for provider in config.research_disabled_providers if provider in known]
+    invalid = [
+        provider
+        for provider in config.research_preferred_providers + config.research_disabled_providers
+        if provider not in known
+    ]
+    return preferred, disabled, invalid
+
+
+def _apply_research_overrides(capability: str, providers: list[str]) -> list[str]:
+    preferred, disabled, _ = _safe_provider_overrides()
+    allowed = [
+        provider
+        for provider in providers
+        if provider not in disabled and _provider_supports_capability(provider, capability)
+    ]
+    ordered = [
+        provider
+        for provider in preferred
+        if provider in allowed and _provider_supports_capability(provider, capability)
+    ]
+    ordered.extend(provider for provider in allowed if provider not in ordered)
+    return ordered
+
+
+def _research_fetch_order(query: str, url: str = "", capability_status: dict[str, Any] | None = None) -> list[str]:
+    providers = _configured_for_capability("web_fetch", capability_status)
+    target = f"{query} {url}".lower()
+    if _contains_any(target, RESEARCH_JS_HEAVY_KEYWORDS):
+        preferred = ["firecrawl", "tavily", "jina", "zhipu-mcp-reader"]
+    elif _contains_any(target, RESEARCH_PDF_KEYWORDS) or url.lower().endswith(".pdf"):
+        preferred = ["jina", "tavily", "zhipu-mcp-reader", "firecrawl"]
+    elif url or _extract_urls(query):
+        preferred = ["jina", "tavily", "zhipu-mcp-reader", "firecrawl"]
+    else:
+        preferred = providers
+    ordered = [provider for provider in preferred if provider in providers]
+    ordered.extend(provider for provider in providers if provider not in ordered)
+    return _apply_research_overrides("web_fetch", ordered)
+
+
+def _research_route_signals(question: str, plan: dict[str, Any]) -> dict[str, Any]:
+    intent = plan.get("intent_signals") or {}
+    rules_route = build_rules_route(question, plan_intent_signals=intent, mode="rules")
+    text = question.lower()
+    return {
+        "docs_api_intent": rules_route.docs_intent,
+        "official_low_noise_intent": _contains_any(question, DEEP_EXA_DISCOVERY_KEYWORDS),
+        "current_or_locale_intent": rules_route.web_current_intent,
+        "known_url": rules_route.fetch_intent,
+        "pdf_or_arxiv_intent": _contains_any(question, RESEARCH_PDF_KEYWORDS),
+        "js_heavy_intent": _contains_any(question, RESEARCH_JS_HEAVY_KEYWORDS),
+        "vertical_intent": bool(rules_route.intent_signals.get("vertical_intent")),
+        "claim_risk": intent.get("claim_risk", "medium"),
+        "cross_validation_need": intent.get("cross_validation_need", "normal"),
+        "raw_query": text,
+    }
+
+
+def _research_capability_routes(
+    question: str,
+    plan: dict[str, Any],
+    fallback: str,
+    capability_status: dict[str, Any] | None = None,
+    route_result: IntentRouteResult | None = None,
+) -> dict[str, Any]:
+    signals = _research_route_signals(question, plan)
+    if route_result is not None:
+        signals["docs_api_intent"] = route_result.docs_intent
+        signals["current_or_locale_intent"] = route_result.web_current_intent
+        signals["known_url"] = route_result.fetch_intent
+        signals["vertical_intent"] = bool(route_result.intent_signals.get("vertical_intent") or "vertical_search" in route_result.required_capabilities)
+    _, _, invalid_overrides = _safe_provider_overrides()
+    routes: dict[str, Any] = {
+        "signals": signals,
+        "fallback_mode": fallback,
+        "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+        "invalid_provider_overrides": invalid_overrides,
+        "capabilities": {},
+    }
+    if route_result is not None:
+        route_data = route_result.to_dict()
+        for key in (
+            "intent_router_mode",
+            "required_capabilities",
+            "intent_signals",
+            "confidence",
+            "router_engines_used",
+            "degraded",
+            "degraded_reason",
+            "reasons",
+        ):
+            routes[key] = route_data.get(key)
+
+    web_search = _configured_for_capability("web_search", capability_status)
+    if signals["current_or_locale_intent"]:
+        ordered = [provider for provider in ["zhipu", "zhipu-mcp", "tavily", "firecrawl"] if provider in web_search]
+    else:
+        ordered = [provider for provider in ["tavily", "firecrawl", "zhipu", "zhipu-mcp"] if provider in web_search]
+    routes["capabilities"]["web_search"] = {
+        "providers": _apply_research_overrides("web_search", ordered),
+        "reason": "current/locale evidence" if signals["current_or_locale_intent"] else "broad source discovery",
+    }
+
+    docs = _configured_for_capability("docs_search", capability_status)
+    docs_order = [provider for provider in ["context7", "exa"] if provider in docs]
+    if signals["official_low_noise_intent"] and not signals["docs_api_intent"]:
+        docs_order = [provider for provider in ["exa", "context7"] if provider in docs]
+    routes["capabilities"]["docs_search"] = {
+        "providers": _apply_research_overrides("docs_search", docs_order),
+        "reason": "docs/API evidence" if signals["docs_api_intent"] else "official low-noise discovery",
+    }
+
+    fetch_order = _research_fetch_order(question, capability_status=capability_status)
+    routes["capabilities"]["web_fetch"] = {
+        "providers": fetch_order,
+        "reason": "JS-heavy fetch" if signals["js_heavy_intent"] else ("known URL/PDF extraction" if signals["known_url"] or signals["pdf_or_arxiv_intent"] else "evidence extraction"),
+    }
+
+    vertical = _configured_for_capability("vertical_search", capability_status)
+    routes["capabilities"]["vertical_search"] = {
+        "providers": _apply_research_overrides("vertical_search", vertical) if signals["vertical_intent"] else [],
+        "reason": "vertical intent matched" if signals["vertical_intent"] else "vertical intent absent",
+        "experimental": True,
+    }
+
+    return routes
+
+
+def _research_evidence_item(
+    *,
+    url: str,
+    provider: str,
+    title: str = "",
+    content: str = "",
+    source_type: str = "fetched_page",
+    subquestion_id: str = "",
+) -> dict[str, Any]:
+    digest = hashlib.sha1(f"{url}\n{provider}\n{title}".encode("utf-8")).hexdigest()[:12]
+    return {
+        "id": f"e{digest}",
+        "url": url,
+        "title": title or url,
+        "provider": provider,
+        "source_type": source_type,
+        "subquestion_id": subquestion_id,
+        "content": content,
+        "content_len": len(content or ""),
+        "verified": bool(content and content.strip()),
+    }
+
+
+def _citation_items(evidence_items: list[dict[str, Any]]) -> list[dict[str, str]]:
+    citations: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in evidence_items:
+        url = item.get("url", "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        citations.append({
+            "url": url,
+            "title": item.get("title") or url,
+            "provider": item.get("provider") or "",
+        })
+    return citations
+
+
+def _evidence_only_synthesis(question: str, evidence_items: list[dict[str, Any]], gaps: list[dict[str, Any]]) -> str:
+    if not evidence_items:
+        return (
+            f"未能为 `{question}` 获取可引用的页面正文证据。"
+            "本次 research 已停止在降级状态，未对缺证据的结论做断言。"
+        )
+    lines = [f"Research result for: {question}", ""]
+    lines.append("Evidence-backed findings:")
+    for index, item in enumerate(evidence_items, 1):
+        content = re.sub(r"\s+", " ", (item.get("content") or "").strip())
+        excerpt = content[:360]
+        lines.append(f"{index}. {item.get('title') or item.get('url')} ({item.get('provider')})")
+        if excerpt:
+            lines.append(f"   Evidence excerpt: {excerpt}")
+        lines.append(f"   Source: {item.get('url')}")
+    if gaps:
+        lines.extend(["", "Unverified gaps:"])
+        for gap in gaps:
+            lines.append(f"- {gap.get('subquestion_id', '')}: {gap.get('reason', '')}")
+    return "\n".join(lines).strip()
+
+
+def _select_candidate_urls(sources: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in sources:
+        url = (source.get("url") or "").strip()
+        if not url or url.startswith("context7:") or url in seen:
+            continue
+        seen.add(url)
+        selected.append(source)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _artifact_path(evidence_root: str, name: str) -> Path:
+    return Path(evidence_root) / name
+
+
+def _write_research_artifact(evidence_root: str, name: str, data: Any) -> None:
+    root = Path(evidence_root)
+    root.mkdir(parents=True, exist_ok=True)
+    path = _artifact_path(evidence_root, name)
+    if isinstance(data, str):
+        path.write_text(data, encoding="utf-8")
+    else:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _is_docs_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in DOCS_INTENT_KEYWORDS)
+    return build_rules_route(query, mode="rules").docs_intent
 
 
 def _is_zh_current_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in ZH_CURRENT_KEYWORDS)
+    return build_rules_route(query, mode="rules").zh_current_intent
+
+
+def _is_web_current_intent(query: str) -> bool:
+    return build_rules_route(query, mode="rules").web_current_intent
 
 
 def _is_fetch_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in FETCH_INTENT_KEYWORDS)
+    return build_rules_route(query, mode="rules").fetch_intent
 
 
 def _contains_any(query: str, keywords: set[str]) -> bool:
@@ -311,12 +720,7 @@ def _contains_any(query: str, keywords: set[str]) -> bool:
 
 
 def _extract_urls(query: str) -> list[str]:
-    urls = []
-    for match in re.findall(r"https?://[^\s<>\]\)\"']+", query):
-        cleaned = match.rstrip(".,;，。；)")
-        if cleaned:
-            urls.append(cleaned)
-    return urls
+    return router_extract_urls(query)
 
 
 def _slugify_query(query: str) -> str:
@@ -648,6 +1052,266 @@ def build_deep_research_plan(query: str, budget: str = "standard", evidence_dir:
     }
 
 
+async def research(
+    query: str,
+    budget: str = "deep",
+    evidence_dir: str = "",
+    fallback: str = "auto",
+) -> dict[str, Any]:
+    start = time.time()
+    question = query.strip()
+    fallback_mode = (fallback or "auto").strip().lower()
+    if fallback_mode not in {"auto", "off"}:
+        return {
+            "ok": False,
+            "error_type": "parameter_error",
+            "error": f"Invalid fallback mode: {fallback_mode}",
+            "question": question,
+            "mode": "deep_research_execution",
+            "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+            "elapsed_ms": _elapsed_ms(start),
+        }
+
+    minimum = validate_minimum_profile()
+    if not minimum.get("ok"):
+        return {
+            "ok": False,
+            "error_type": minimum.get("error_type", "config_error"),
+            "error": minimum.get("error", MINIMUM_PROFILE_ERROR),
+            "question": question,
+            "mode": "deep_research_execution",
+            "minimum_profile_ok": False,
+            "capability_status": minimum.get("capability_status", {}),
+            "final_answer": "",
+            "citations": [],
+            "evidence_items": [],
+            "gap_check": {
+                "status": "failed",
+                "gaps": [{"subquestion_id": "", "reason": "minimum profile is missing required capabilities"}],
+            },
+            "provider_attempts": [],
+            "fallback_used": False,
+            "degraded": True,
+            "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+            "evidence_dir": evidence_dir,
+            "elapsed_ms": _elapsed_ms(start),
+        }
+
+    plan = build_deep_research_plan(question, budget=_deep_budget(budget or "deep"), evidence_dir=evidence_dir)
+    evidence_root = plan.get("evidence_dir") or _default_evidence_dir(question)
+    try:
+        route_result = await IntentRouter(config).route(
+            question,
+            validation_level="balanced",
+            allow_remote=True,
+            plan_intent_signals=plan.get("intent_signals") or {},
+        )
+    except ValueError as e:
+        return {
+            "ok": False,
+            "error_type": "parameter_error",
+            "error": str(e),
+            "question": question,
+            "mode": "deep_research_execution",
+            "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+            "elapsed_ms": _elapsed_ms(start),
+        }
+    routes = _research_capability_routes(question, plan, fallback_mode, route_result=route_result)
+    provider_attempts: list[dict[str, Any]] = []
+    discovery_sources: list[dict[str, Any]] = []
+    evidence_items: list[dict[str, Any]] = []
+    stage_results: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
+
+    _write_research_artifact(evidence_root, "00-plan.json", plan)
+
+    urls = _extract_urls(question)
+    fetch_order = routes["capabilities"]["web_fetch"]["providers"]
+    if urls:
+        for index, url in enumerate(urls, 1):
+            fetch_result, attempts = await _run_web_fetch_fallback(url, fallback=fallback_mode, preferred_order=fetch_order)
+            provider_attempts.extend(attempts)
+            stage_results.append({"stage": "known_url_fetch", "url": url, "ok": bool(fetch_result), "provider_attempts": attempts})
+            if fetch_result:
+                item = _research_evidence_item(
+                    url=fetch_result["url"],
+                    provider=fetch_result["provider"],
+                    title=fetch_result["url"],
+                    content=fetch_result["content"],
+                    subquestion_id="sq1",
+                )
+                evidence_items.append(item)
+                _write_research_artifact(evidence_root, f"{index:02d}-fetch-{fetch_result['provider']}.md", fetch_result["content"])
+            else:
+                gaps.append({"subquestion_id": "sq1", "reason": f"failed to fetch known URL: {url}", "url": url})
+
+    signals = routes["signals"]
+    if signals["docs_api_intent"]:
+        docs_providers = routes["capabilities"]["docs_search"]["providers"]
+        selected_docs_providers = docs_providers[:1] if fallback_mode == "off" else docs_providers
+        if not selected_docs_providers:
+            gaps.append({"subquestion_id": "sq2", "reason": "no configured docs_search provider for docs/API evidence"})
+        for provider in selected_docs_providers:
+            step_start = time.time()
+            if provider == "context7":
+                data = await context7_library(question, question)
+                if data.get("ok") and data.get("results"):
+                    provider_attempts.append(_attempt("docs_search", "context7", "ok", step_start, result_count=len(data.get("results") or [])))
+                    stage_results.append({"stage": "docs_discovery", "provider": "context7", "ok": True, "result_count": len(data.get("results") or [])})
+                    library_id = (data.get("results") or [{}])[0].get("id", "")
+                    if library_id:
+                        docs_start = time.time()
+                        docs_data = await context7_docs(library_id, question)
+                        if docs_data.get("ok") and docs_data.get("content"):
+                            provider_attempts.append(_attempt("docs_search", "context7", "ok", docs_start, result_count=1))
+                            item = _research_evidence_item(
+                                url=f"context7:{library_id}",
+                                provider="context7",
+                                title=library_id,
+                                content=docs_data.get("content", ""),
+                                source_type="docs",
+                                subquestion_id="sq2",
+                            )
+                            evidence_items.append(item)
+                            _write_research_artifact(evidence_root, "docs-context7.md", docs_data.get("content", ""))
+                            break
+                        docs_status = "error" if docs_data.get("error_type") else "empty"
+                        provider_attempts.append(_attempt("docs_search", "context7", docs_status, docs_start, error_type=docs_data.get("error_type", ""), error=docs_data.get("error", "")))
+                    if fallback_mode == "off":
+                        break
+                    continue
+                status = "error" if data.get("error_type") in {"auth_error", "timeout", "network_error", "runtime_error"} else "empty"
+                provider_attempts.append(_attempt("docs_search", "context7", status, step_start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+            elif provider == "exa":
+                data = await exa_search(question, num_results=5, include_highlights=True)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "exa")
+                    if sources:
+                        provider_attempts.append(_attempt("docs_search", "exa", "ok", step_start, result_count=len(sources)))
+                        discovery_sources.extend(sources)
+                        stage_results.append({"stage": "docs_discovery", "provider": "exa", "ok": True, "result_count": len(sources)})
+                        break
+                provider_attempts.append(_attempt("docs_search", "exa", "error" if data.get("error_type") else "empty", step_start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+
+    should_run_web_discovery = (
+        signals["current_or_locale_intent"]
+        or signals["cross_validation_need"] == "high"
+        or (not evidence_items and not discovery_sources)
+    ) and not (urls and fallback_mode == "off")
+    if should_run_web_discovery:
+        web_provider_order = routes["capabilities"]["web_search"]["providers"]
+        if web_provider_order:
+            web_sources, attempts = await _run_web_search_fallback(
+                question,
+                count=5,
+                providers=",".join(web_provider_order),
+                fallback=fallback_mode,
+            )
+            provider_attempts.extend(attempts)
+            discovery_sources.extend(web_sources)
+            stage_results.append({"stage": "web_discovery", "ok": bool(web_sources), "result_count": len(web_sources), "provider_attempts": attempts})
+        else:
+            gaps.append({"subquestion_id": "", "reason": "no configured web_search provider for discovery"})
+
+    exa_in_selected_docs_route = "exa" in routes["capabilities"]["docs_search"]["providers"]
+    if (
+        fallback_mode != "off"
+        and signals["official_low_noise_intent"]
+        and exa_in_selected_docs_route
+        and not any(source.get("provider") == "exa" for source in discovery_sources)
+    ):
+        exa_start = time.time()
+        data = await exa_search(question, num_results=5, include_highlights=True)
+        if data.get("ok"):
+            sources = _normalize_source_results(data.get("results"), "exa")
+            if sources:
+                provider_attempts.append(_attempt("docs_search", "exa", "ok", exa_start, result_count=len(sources)))
+                discovery_sources.extend(sources)
+        else:
+            provider_attempts.append(_attempt("docs_search", "exa", "error", exa_start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+
+    if signals["vertical_intent"] and routes["capabilities"]["vertical_search"]["providers"]:
+        vertical_start = time.time()
+        data = await anysearch_search(question, max_results=5)
+        if data.get("ok"):
+            sources = _normalize_source_results(data.get("results"), "anysearch")
+            provider_attempts.append(_attempt("vertical_search", "anysearch", "ok" if sources else "empty", vertical_start, result_count=len(sources)))
+            discovery_sources.extend(sources)
+            stage_results.append({"stage": "vertical_discovery", "provider": "anysearch", "ok": bool(sources), "result_count": len(sources)})
+        else:
+            provider_attempts.append(_attempt("vertical_search", "anysearch", "error", vertical_start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+
+    candidates = _select_candidate_urls(discovery_sources, limit=6)
+    fetched_urls = {item.get("url") for item in evidence_items}
+    no_new_evidence = True
+    for index, candidate in enumerate(candidates, 1):
+        url = candidate.get("url", "")
+        if not url or url in fetched_urls:
+            continue
+        order = _research_fetch_order(question, url)
+        fetch_result, attempts = await _run_web_fetch_fallback(url, fallback=fallback_mode, preferred_order=order)
+        provider_attempts.extend(attempts)
+        stage_results.append({"stage": "candidate_fetch", "url": url, "ok": bool(fetch_result), "provider_attempts": attempts})
+        if fetch_result:
+            no_new_evidence = False
+            fetched_urls.add(url)
+            content = fetch_result.get("content", "")
+            item = _research_evidence_item(
+                url=fetch_result["url"],
+                provider=fetch_result["provider"],
+                title=candidate.get("title") or fetch_result["url"],
+                content=content,
+                subquestion_id=candidate.get("subquestion_id", ""),
+            )
+            evidence_items.append(item)
+            _write_research_artifact(evidence_root, f"fetch-{index:02d}-{fetch_result['provider']}.md", content)
+        elif fallback_mode == "off":
+            gaps.append({"subquestion_id": "", "reason": f"fetch failed with fallback off: {url}", "url": url})
+
+    if not evidence_items:
+        gaps.append({"subquestion_id": "", "reason": "no fetched/read evidence items were produced"})
+    elif no_new_evidence and not urls and candidates:
+        gaps.append({"subquestion_id": "", "reason": "discovery produced candidates but no new fetch evidence converged"})
+
+    covered = bool(evidence_items)
+    gap_status = "closed" if covered and not gaps else ("degraded" if evidence_items else "failed")
+    citations = _citation_items(evidence_items)
+    final_answer = _evidence_only_synthesis(question, evidence_items, gaps)
+    result = {
+        "ok": bool(evidence_items),
+        "error_type": "" if evidence_items else "evidence_error",
+        "error": "" if evidence_items else "research could not obtain fetched evidence",
+        "mode": "deep_research_execution",
+        "query_mode": "research",
+        "question": question,
+        "budget": _deep_budget(budget or "deep"),
+        "research_plan": plan,
+        "routing_decision": routes,
+        "stage_results": stage_results,
+        "discovery_sources": discovery_sources,
+        "final_answer": final_answer,
+        "content": final_answer,
+        "citations": citations,
+        "evidence_items": evidence_items,
+        "gap_check": {
+            "status": gap_status,
+            "gaps": gaps,
+            "stop_reason": "evidence_converged" if gap_status == "closed" else ("degraded_with_gaps" if evidence_items else "provider_exhausted"),
+        },
+        "provider_attempts": provider_attempts,
+        "providers_used": _provider_names_from_attempts(provider_attempts),
+        "fallback_used": _fallback_used(provider_attempts),
+        "degraded": bool(gaps),
+        "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+        "evidence_dir": evidence_root,
+        "minimum_profile_ok": minimum.get("ok", False),
+        "capability_status": minimum.get("capability_status", {}),
+        "elapsed_ms": _elapsed_ms(start),
+    }
+    _write_research_artifact(evidence_root, "summary.json", result)
+    return result
+
+
 def get_capability_status() -> dict[str, Any]:
     main_configured = _configured_main_search_provider_ids()
     status = {
@@ -661,12 +1325,13 @@ def get_capability_status() -> dict[str, Any]:
                 name
                 for name, enabled in [
                     ("zhipu", bool(config.zhipu_api_key)),
+                    ("zhipu-mcp", bool(config.zhipu_mcp_api_key)),
                     ("tavily", bool(config.tavily_api_key)),
                     ("firecrawl", bool(config.firecrawl_api_key)),
                 ]
                 if enabled
             ],
-            "fallback_chain": ["zhipu", "tavily", "firecrawl"],
+            "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
         },
         "docs_search": {
             "configured": [
@@ -684,11 +1349,13 @@ def get_capability_status() -> dict[str, Any]:
                 name
                 for name, enabled in [
                     ("tavily", bool(config.tavily_api_key)),
+                    ("jina", bool(config.jina_api_key)),
+                    ("zhipu-mcp-reader", bool(config.zhipu_mcp_api_key)),
                     ("firecrawl", bool(config.firecrawl_api_key)),
                 ]
                 if enabled
             ],
-            "fallback_chain": ["tavily", "firecrawl"],
+            "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
         },
         "vertical_search": {
             "configured": ["anysearch"] if config.anysearch_api_key else [],
@@ -886,13 +1553,26 @@ def extra_results_to_sources(
     return sources
 
 
-async def _run_web_fetch_fallback(url: str, fallback: str = "auto") -> tuple[dict[str, Any] | None, list[dict]]:
+async def _run_web_fetch_fallback(
+    url: str,
+    fallback: str = "auto",
+    preferred_order: list[str] | None = None,
+) -> tuple[dict[str, Any] | None, list[dict]]:
     attempts: list[dict] = []
     providers = []
     if config.tavily_api_key:
         providers.append("tavily")
+    if config.jina_api_key:
+        providers.append("jina")
+    if config.zhipu_mcp_api_key:
+        providers.append("zhipu-mcp-reader")
     if config.firecrawl_api_key:
         providers.append("firecrawl")
+    if preferred_order:
+        allowed = {provider for provider in providers}
+        ordered = [provider for provider in preferred_order if provider in allowed]
+        ordered.extend(provider for provider in providers if provider not in ordered)
+        providers = ordered
     if fallback == "off":
         providers = providers[:1]
 
@@ -901,6 +1581,20 @@ async def _run_web_fetch_fallback(url: str, fallback: str = "auto") -> tuple[dic
         try:
             if provider == "tavily":
                 content = await call_tavily_extract(url)
+            elif provider == "jina":
+                data = await jina_fetch(url)
+                content = data.get("content") if data.get("ok") else None
+                if not data.get("ok"):
+                    status = "error" if data.get("error_type") in {"auth_error", "config_error", "parameter_error", "quality_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+                    attempts.append(_attempt("web_fetch", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+                    continue
+            elif provider == "zhipu-mcp-reader":
+                data = await zhipu_mcp_reader(url)
+                content = data.get("content") if data.get("ok") else None
+                if not data.get("ok"):
+                    status = "error" if data.get("error_type") in {"auth_error", "config_error", "provider_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+                    attempts.append(_attempt("web_fetch", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+                    continue
             else:
                 content = await call_firecrawl_scrape(url)
             if content and content.strip():
@@ -928,6 +1622,8 @@ async def _run_web_search_fallback(
     configured: list[str] = []
     if config.zhipu_api_key:
         configured.append("zhipu")
+    if config.zhipu_mcp_api_key:
+        configured.append("zhipu-mcp")
     if config.tavily_api_key:
         configured.append("tavily")
     if config.firecrawl_api_key:
@@ -948,6 +1644,15 @@ async def _run_web_search_fallback(
                         attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
                         return sources, attempts
                 status = "error" if data.get("error_type") in {"rate_limited", "auth_error", "timeout", "network_error", "runtime_error"} else "empty"
+                attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+            elif provider == "zhipu-mcp":
+                data = await zhipu_mcp_search(query, count=count)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "zhipu-mcp")
+                    if sources:
+                        attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                        return sources, attempts
+                status = "error" if data.get("error_type") in {"rate_limited", "auth_error", "timeout", "network_error", "runtime_error", "provider_error"} else "empty"
                 attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
             elif provider == "tavily":
                 results = await call_tavily_search(query, count)
@@ -1017,6 +1722,37 @@ async def _run_docs_search_fallback(
                 attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
         except Exception as e:
             attempts.append(_attempt("docs_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+    return [], attempts
+
+
+async def _run_vertical_search_fallback(
+    query: str,
+    providers: str = "auto",
+    fallback: str = "auto",
+) -> tuple[list[dict], list[dict]]:
+    provider_filter = _parse_provider_filter(providers)
+    attempts: list[dict] = []
+    configured: list[str] = []
+    if config.anysearch_api_key:
+        configured.append("anysearch")
+    if provider_filter is not None:
+        configured = [p for p in configured if p in provider_filter]
+    if fallback == "off":
+        configured = configured[:1]
+
+    for provider in configured:
+        start = time.time()
+        try:
+            data = await anysearch_search(query, max_results=5)
+            if data.get("ok"):
+                sources = _normalize_source_results(data.get("results"), "anysearch")
+                if sources:
+                    attempts.append(_attempt("vertical_search", provider, "ok", start, result_count=len(sources)))
+                    return sources, attempts
+            status = "error" if data.get("error_type") in {"auth_error", "provider_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
+            attempts.append(_attempt("vertical_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+        except Exception as e:
+            attempts.append(_attempt("vertical_search", provider, "error", start, error_type="runtime_error", error=str(e)))
     return [], attempts
 
 
@@ -1123,6 +1859,16 @@ async def call_firecrawl_scrape(url: str, ctx=None) -> str | None:
             await log_info(ctx, f"Firecrawl error: {e}", config.debug_enabled)
             return None
     return None
+
+
+async def call_jina_reader(url: str) -> dict[str, Any]:
+    raw = await JinaReaderProvider(
+        config.jina_reader_api_url,
+        config.jina_api_key,
+        config.jina_respond_with,
+        config.jina_timeout,
+    ).fetch(url)
+    return await _decode_provider_json(raw, provider="jina")
 
 
 async def call_tavily_map(
@@ -1240,24 +1986,15 @@ async def search(
         elif has_firecrawl:
             firecrawl_count = extra_sources
 
-    docs_intent = _is_docs_intent(query)
-    zh_current_intent = _is_zh_current_intent(query)
-    web_current_intent = zh_current_intent
-    fetch_intent = _is_fetch_intent(query)
-    supplemental_paths: list[str] = []
-    if docs_intent:
-        supplemental_paths.append("docs_search")
-    if web_current_intent or validation_level == "strict":
-        supplemental_paths.append("web_search")
-    if fetch_intent:
-        supplemental_paths.append("web_fetch")
     selected_main_provider_configs = main_provider_configs if fallback_mode != "off" else main_provider_configs[:1]
+    try:
+        route_result = await IntentRouter(config).route(query, validation_level=validation_level, allow_remote=True)
+    except ValueError as e:
+        return _empty_search_result(start, session_id, query, "parameter_error", str(e), extra={"validation_level": validation_level})
+    fetch_urls = _extract_urls(query)
+    supplemental_paths = route_result.required_capabilities
     routing_decision = {
-        "docs_intent": docs_intent,
-        "zh_current_intent": zh_current_intent,
-        "web_current_intent": web_current_intent,
-        "fetch_intent": fetch_intent,
-        "supplemental_paths": supplemental_paths,
+        **route_result.to_dict(),
         "validation_level": validation_level,
         "fallback_mode": fallback_mode,
         "providers": providers,
@@ -1345,19 +2082,24 @@ async def search(
 
     supplemental_sources: list[dict] = []
     if validation_level in {"balanced", "strict"}:
-        if docs_intent:
+        if "docs_search" in supplemental_paths:
             docs_sources, docs_attempts = await _run_docs_search_fallback(query, providers=providers, fallback=fallback_mode)
             provider_attempts.extend(docs_attempts)
             supplemental_sources.extend(docs_sources)
-        if web_current_intent or validation_level == "strict":
+        if "web_search" in supplemental_paths:
             web_sources, web_attempts = await _run_web_search_fallback(query, count=max(1, extra_sources or 3), providers=providers, fallback=fallback_mode)
             provider_attempts.extend(web_attempts)
             supplemental_sources.extend(web_sources)
-        if fetch_intent:
-            fetch_result, fetch_attempts = await _run_web_fetch_fallback(query.strip(), fallback=fallback_mode)
+        if "web_fetch" in supplemental_paths:
+            fetch_url = fetch_urls[0] if fetch_urls else query.strip()
+            fetch_result, fetch_attempts = await _run_web_fetch_fallback(fetch_url, fallback=fallback_mode)
             provider_attempts.extend(fetch_attempts)
             if fetch_result:
                 supplemental_sources.append({"url": fetch_result["url"], "provider": fetch_result["provider"], "description": fetch_result["content"][:300]})
+        if "vertical_search" in supplemental_paths:
+            vertical_sources, vertical_attempts = await _run_vertical_search_fallback(query, providers=providers, fallback=fallback_mode)
+            provider_attempts.extend(vertical_attempts)
+            supplemental_sources.extend(vertical_sources)
 
     extra_source_items = merge_sources(extra_source_items, supplemental_sources)
     sources = merge_sources(primary_sources, extra_source_items)
@@ -1390,6 +2132,517 @@ async def search(
         "capability_status": minimum.get("capability_status", {}),
         "elapsed_ms": _elapsed_ms(start),
     }
+
+
+async def route(
+    query: str,
+    validation: str = "",
+    mode: str = "",
+    allow_remote: bool = True,
+) -> dict[str, Any]:
+    start = time.time()
+    try:
+        validation_level = (validation or config.validation_level).strip().lower()
+        if validation_level not in config._ALLOWED_VALIDATION_LEVELS:
+            raise ValueError(f"Invalid validation level: {validation_level}")
+        route_result = await IntentRouter(config).route(
+            query,
+            validation_level=validation_level,
+            mode=mode,
+            allow_remote=allow_remote,
+        )
+    except ValueError as e:
+        return {
+            "ok": False,
+            "query": query,
+            "error_type": "parameter_error",
+            "error": str(e),
+            "elapsed_ms": _elapsed_ms(start),
+        }
+    data = route_result.to_dict()
+    router_status = intent_router_status()
+    preset_fields = {
+        key: router_status.get(key)
+        for key in (
+            "embedding_preset_id",
+            "embedding_preset_model",
+            "embedding_preset_api_url",
+            "embedding_preset_threshold",
+            "embedding_preset_margin",
+            "embedding_preset_threshold_matches",
+            "embedding_preset_margin_matches",
+            "embedding_preset_recommended",
+            "embedding_preset_recommendation",
+            "embedding_preset_commands",
+        )
+        if key in router_status
+    }
+    data.update(
+        {
+            "ok": True,
+            "query": query,
+            "validation_level": validation_level,
+            "executed_search": False,
+            "provider_selection": "not_executed",
+            "embedding_model": router_status.get("embedding_model", ""),
+            "embedding_threshold": router_status.get("embedding_threshold", ""),
+            "embedding_margin": router_status.get("embedding_margin", ""),
+            "embedding_threshold_source": router_status.get("embedding_threshold_source", ""),
+            "embedding_margin_source": router_status.get("embedding_margin_source", ""),
+            "elapsed_ms": _elapsed_ms(start),
+            **preset_fields,
+        }
+    )
+    return data
+
+
+class _CalibrationConfigProxy:
+    def __init__(self, base_config: Any, model: str, threshold: float, margin: float):
+        self._base_config = base_config
+        self._model = model
+        self._threshold = threshold
+        self._margin = margin
+
+    @property
+    def intent_router_mode(self) -> str:
+        return "hybrid"
+
+    @property
+    def intent_embedding_model(self) -> str:
+        return self._model
+
+    @property
+    def intent_embedding_threshold(self) -> float:
+        return self._threshold
+
+    @property
+    def intent_embedding_margin(self) -> float:
+        return self._margin
+
+    def get_config_source(self, key: str) -> str:
+        if key in {"INTENT_EMBEDDING_MODEL", "INTENT_EMBEDDING_THRESHOLD", "INTENT_EMBEDDING_MARGIN"}:
+            return "calibration"
+        getter = getattr(self._base_config, "get_config_source", None)
+        if callable(getter):
+            return str(getter(key))
+        return "default"
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base_config, name)
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        item = value.strip()
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _parse_calibration_models(models: str = "") -> list[str]:
+    if models.strip():
+        return _dedupe_preserve_order([item.strip() for item in models.split(",")])
+    defaults = list(DEFAULT_ROUTE_CALIBRATION_MODELS)
+    current = config.intent_embedding_model
+    if current:
+        defaults.append(current)
+    return _dedupe_preserve_order(defaults)
+
+
+def _configured_embedding_threshold() -> float:
+    try:
+        return config.intent_embedding_threshold
+    except ValueError:
+        return DEFAULT_SEMANTIC_CONFIDENCE_THRESHOLD
+
+
+def _configured_embedding_margin() -> float:
+    try:
+        return config.intent_embedding_margin
+    except ValueError:
+        return DEFAULT_SEMANTIC_CONFIDENCE_MARGIN
+
+
+def _route_calibration_dataset() -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for label, queries in ROUTE_CALIBRATION_QUERIES.items():
+        expected = [] if label == "none" else [label]
+        for index, query_text in enumerate(queries, 1):
+            examples.append(
+                {
+                    "id": f"{label}-{index:02d}",
+                    "query": query_text,
+                    "expected_capabilities": list(expected),
+                    "expected_label": label,
+                }
+            )
+    return examples
+
+
+async def _embed_in_batches(router: IntentRouter, inputs: list[str], batch_size: int = 64) -> list[list[float]]:
+    embeddings: list[list[float]] = []
+    for start_index in range(0, len(inputs), batch_size):
+        embeddings.extend(await router._embed(inputs[start_index : start_index + batch_size]))
+    return embeddings
+
+
+def _label_present(capabilities: set[str], label: str) -> bool:
+    if label == "none":
+        return not capabilities
+    return label in capabilities
+
+
+def _macro_f1(expected: list[set[str]], predicted: list[set[str]], labels: list[str]) -> dict[str, Any]:
+    per_label: dict[str, float] = {}
+    for label in labels:
+        true_positive = 0
+        false_positive = 0
+        false_negative = 0
+        for expected_caps, predicted_caps in zip(expected, predicted):
+            expected_has = _label_present(expected_caps, label)
+            predicted_has = _label_present(predicted_caps, label)
+            if expected_has and predicted_has:
+                true_positive += 1
+            elif not expected_has and predicted_has:
+                false_positive += 1
+            elif expected_has and not predicted_has:
+                false_negative += 1
+        precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0.0
+        recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else 0.0
+        per_label[label] = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    macro = sum(per_label.values()) / len(labels) if labels else 0.0
+    return {
+        "macro_f1": round(macro, 4),
+        "per_label_f1": {label: round(score, 4) for label, score in per_label.items()},
+    }
+
+
+def _confusion_label(capabilities: set[str]) -> str:
+    ordered = _ordered_capabilities(capabilities)
+    if not ordered:
+        return "none"
+    if len(ordered) == 1:
+        return ordered[0]
+    return "+".join(ordered)
+
+
+def _confusion_matrix(expected: list[set[str]], predicted: list[set[str]]) -> dict[str, dict[str, int]]:
+    matrix: dict[str, dict[str, int]] = {}
+    for expected_caps, predicted_caps in zip(expected, predicted):
+        actual = _confusion_label(expected_caps)
+        guessed = _confusion_label(predicted_caps)
+        matrix.setdefault(actual, {})
+        matrix[actual][guessed] = matrix[actual].get(guessed, 0) + 1
+    return matrix
+
+
+def _semantic_predictions(
+    records: list[dict[str, Any]],
+    threshold: float,
+    margin: float,
+) -> tuple[list[set[str]], list[dict[str, Any]]]:
+    predictions: list[set[str]] = []
+    summaries: list[dict[str, Any]] = []
+    for record in records:
+        summary = _semantic_summary(record["scores"], threshold, margin)
+        summaries.append(summary)
+        if summary["passed_threshold"] and summary["passed_margin"]:
+            predictions.append({str(summary["top_capability"])})
+        else:
+            predictions.append(set())
+    return predictions, summaries
+
+
+def _candidate_thresholds(records: list[dict[str, Any]]) -> list[float]:
+    values = {round(index / 100, 2) for index in range(50, 96)}
+    values.add(round(_configured_embedding_threshold(), 2))
+    for record in records:
+        summary = _semantic_summary(record["scores"], 0.0, 0.0)
+        top_score = float(summary["top_score"])
+        for delta in (-0.02, -0.01, 0.0, 0.01, 0.02):
+            value = max(0.0, min(1.0, top_score + delta))
+            values.add(round(value, 3))
+    return sorted(values)
+
+
+def _candidate_margins(records: list[dict[str, Any]]) -> list[float]:
+    values = {round(index / 100, 2) for index in range(0, 21)}
+    values.add(round(_configured_embedding_margin(), 2))
+    for record in records:
+        summary = _semantic_summary(record["scores"], 0.0, 0.0)
+        score_margin = float(summary["margin"])
+        for delta in (-0.02, -0.01, 0.0, 0.01, 0.02):
+            value = max(0.0, min(1.0, score_margin + delta))
+            values.add(round(value, 3))
+    return sorted(values)
+
+
+def _select_semantic_parameters(
+    records: list[dict[str, Any]],
+    expected: list[set[str]],
+    labels: list[str],
+) -> dict[str, Any]:
+    best: dict[str, Any] | None = None
+    thresholds = _candidate_thresholds(records)
+    margins = _candidate_margins(records)
+    for threshold in thresholds:
+        for margin in margins:
+            predictions, _ = _semantic_predictions(records, threshold, margin)
+            metrics = _macro_f1(expected, predictions, labels)
+            failures = sum(1 for left, right in zip(expected, predictions) if left != right)
+            candidate = {
+                "threshold": threshold,
+                "margin": margin,
+                "macro_f1": metrics["macro_f1"],
+                "per_label_f1": metrics["per_label_f1"],
+                "failures": failures,
+            }
+            if best is None:
+                best = candidate
+                continue
+            current_key = (candidate["macro_f1"], -candidate["failures"], candidate["threshold"], candidate["margin"])
+            best_key = (best["macro_f1"], -best["failures"], best["threshold"], best["margin"])
+            if current_key > best_key:
+                best = candidate
+    return best or {
+        "threshold": _configured_embedding_threshold(),
+        "margin": _configured_embedding_margin(),
+        "macro_f1": 0.0,
+        "per_label_f1": {},
+        "failures": len(records),
+    }
+
+
+def _representative_failures(
+    records: list[dict[str, Any]],
+    expected: list[set[str]],
+    predicted: list[set[str]],
+    summaries: list[dict[str, Any]],
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for record, expected_caps, predicted_caps, summary in zip(records, expected, predicted, summaries):
+        if expected_caps == predicted_caps:
+            continue
+        rounded_scores = {
+            capability: round(float(score), 4)
+            for capability, score in sorted(record["scores"].items(), key=lambda item: item[0])
+        }
+        failures.append(
+            {
+                "id": record["case"]["id"],
+                "query": record["case"]["query"],
+                "expected": _confusion_label(expected_caps),
+                "predicted": _confusion_label(predicted_caps),
+                "top_capability": summary["top_capability"],
+                "top_score": round(float(summary["top_score"]), 4),
+                "second_score": round(float(summary["second_score"]), 4),
+                "margin": round(float(summary["margin"]), 4),
+                "scores": rounded_scores,
+            }
+        )
+        if len(failures) >= limit:
+            break
+    return failures
+
+
+async def _full_route_predictions(
+    records: list[dict[str, Any]],
+    threshold: float,
+    margin: float,
+    model: str,
+) -> tuple[list[set[str]], list[dict[str, Any]], list[dict[str, Any]]]:
+    proxy = _CalibrationConfigProxy(config, model, threshold, margin)
+    router = IntentRouter(proxy)
+    predictions: list[set[str]] = []
+    summaries: list[dict[str, Any]] = []
+    component_failures: list[dict[str, Any]] = []
+    for record in records:
+        query_text = record["case"]["query"]
+        rules = build_rules_route(query_text, validation_level="balanced", mode="hybrid")
+        merged_caps = set(rules.required_capabilities)
+        summary = _semantic_summary(record["scores"], threshold, margin)
+        summaries.append(summary)
+        semantic = {"scores": record["scores"], **summary}
+        if summary["passed_threshold"] and summary["passed_margin"]:
+            merged_caps.add(str(summary["top_capability"]))
+        if router._classifier_configured():
+            try:
+                classifier = await router._classifier_route(query_text, rules.to_dict(), semantic)
+                for capability in classifier.get("required_capabilities") or []:
+                    if capability in ROUTABLE_CAPABILITIES and _classifier_can_add_capability(capability, rules):
+                        merged_caps.add(str(capability))
+            except Exception as exc:
+                if len(component_failures) < 10:
+                    component_failures.append(
+                        {
+                            "id": record["case"]["id"],
+                            "query": query_text,
+                            "component": "classifier",
+                            "error": str(exc),
+                        }
+                    )
+        predictions.append(set(_ordered_capabilities(merged_caps)))
+    return predictions, summaries, component_failures
+
+
+def _model_failure_result(model: str, start: float, error: str, error_type: str = "provider_error") -> dict[str, Any]:
+    return {
+        "model": model,
+        "ok": False,
+        "availability": "failed",
+        "error_type": error_type,
+        "error": error,
+        "dimension": 0,
+        "latency_ms": 0.0,
+        "semantic_macro_f1": 0.0,
+        "full_route_macro_f1": 0.0,
+        "recommended_threshold": None,
+        "recommended_margin": None,
+        "confusion_matrix": {},
+        "semantic_failures": [],
+        "full_route_failures": [],
+        "elapsed_ms": _elapsed_ms(start),
+    }
+
+
+async def _evaluate_calibration_model(model: str, dataset: list[dict[str, Any]], labels: list[str]) -> dict[str, Any]:
+    start = time.time()
+    proxy = _CalibrationConfigProxy(
+        config,
+        model,
+        _configured_embedding_threshold(),
+        _configured_embedding_margin(),
+    )
+    router = IntentRouter(proxy)
+    if not router._embeddings_configured():
+        return _model_failure_result(
+            model,
+            start,
+            "INTENT_EMBEDDING_API_URL and INTENT_EMBEDDING_API_KEY must be configured before calibration.",
+            "config_error",
+        )
+
+    utterances: list[tuple[str, str]] = []
+    for capability, examples in CAPABILITY_UTTERANCES.items():
+        for example in examples:
+            utterances.append((capability, example))
+    inputs = [item["query"] for item in dataset] + [example for _capability, example in utterances]
+    embed_start = time.time()
+    embeddings = await _embed_in_batches(router, inputs)
+    latency_ms = _elapsed_ms(embed_start)
+    if len(embeddings) != len(inputs):
+        return _model_failure_result(
+            model,
+            start,
+            f"Embedding response returned {len(embeddings)} rows for {len(inputs)} inputs.",
+        )
+    dimension = len(embeddings[0]) if embeddings else 0
+    query_embeddings = embeddings[: len(dataset)]
+    utterance_embeddings = embeddings[len(dataset) :]
+
+    records: list[dict[str, Any]] = []
+    for item, query_embedding in zip(dataset, query_embeddings):
+        scores: dict[str, float] = {}
+        for index, (capability, _example) in enumerate(utterances):
+            score = _cosine_similarity(query_embedding, utterance_embeddings[index])
+            scores[capability] = max(scores.get(capability, 0.0), score)
+        records.append({"case": item, "scores": scores})
+
+    expected = [set(item["expected_capabilities"]) for item in dataset]
+    best = _select_semantic_parameters(records, expected, labels)
+    semantic_predictions, semantic_summaries = _semantic_predictions(records, best["threshold"], best["margin"])
+    semantic_metrics = _macro_f1(expected, semantic_predictions, labels)
+    full_predictions, full_summaries, component_failures = await _full_route_predictions(
+        records,
+        best["threshold"],
+        best["margin"],
+        model,
+    )
+    full_metrics = _macro_f1(expected, full_predictions, labels)
+
+    return {
+        "model": model,
+        "ok": True,
+        "availability": "ok",
+        "dimension": dimension,
+        "latency_ms": latency_ms,
+        "semantic_macro_f1": semantic_metrics["macro_f1"],
+        "semantic_per_label_f1": semantic_metrics["per_label_f1"],
+        "full_route_macro_f1": full_metrics["macro_f1"],
+        "full_route_per_label_f1": full_metrics["per_label_f1"],
+        "recommended_threshold": round(float(best["threshold"]), 3),
+        "recommended_margin": round(float(best["margin"]), 3),
+        "recommendation_basis": "semantic_macro_f1",
+        "confusion_matrix": _confusion_matrix(expected, semantic_predictions),
+        "full_route_confusion_matrix": _confusion_matrix(expected, full_predictions),
+        "semantic_failures": _representative_failures(records, expected, semantic_predictions, semantic_summaries),
+        "full_route_failures": _representative_failures(records, expected, full_predictions, full_summaries),
+        "component_failures": component_failures,
+        "elapsed_ms": _elapsed_ms(start),
+    }
+
+
+async def route_calibrate(models: str = "") -> dict[str, Any]:
+    start = time.time()
+    selected_models = _parse_calibration_models(models)
+    dataset = _route_calibration_dataset()
+    labels = [*sorted(ROUTABLE_CAPABILITIES), "none"]
+    results: list[dict[str, Any]] = []
+    for model in selected_models:
+        try:
+            results.append(await _evaluate_calibration_model(model, dataset, labels))
+        except Exception as exc:
+            results.append(_model_failure_result(model, start, str(exc)))
+
+    successful = [item for item in results if item.get("ok")]
+    failed_models = [item.get("model") for item in results if not item.get("ok")]
+    recommended = None
+    if successful:
+        recommended = max(
+            successful,
+            key=lambda item: (
+                float(item.get("semantic_macro_f1") or 0.0),
+                float(item.get("full_route_macro_f1") or 0.0),
+                -float(item.get("latency_ms") or 0.0),
+            ),
+        )
+    ok = bool(successful)
+    data: dict[str, Any] = {
+        "ok": ok,
+        "metric": "semantic_macro_f1",
+        "primary_metric": "semantic_macro_f1",
+        "full_route_metric_role": "validation",
+        "models": selected_models,
+        "model_results": results,
+        "failed_models": failed_models,
+        "dataset_size": len(dataset),
+        "dataset_counts": {label: len(queries) for label, queries in ROUTE_CALIBRATION_QUERIES.items()},
+        "capabilities": sorted(ROUTABLE_CAPABILITIES),
+        "labels": labels,
+        "default_threshold": _configured_embedding_threshold(),
+        "default_margin": _configured_embedding_margin(),
+        "embedding_model": config.intent_embedding_model,
+        "recommended_model": recommended.get("model") if recommended else "",
+        "recommended_threshold": recommended.get("recommended_threshold") if recommended else None,
+        "recommended_margin": recommended.get("recommended_margin") if recommended else None,
+        "elapsed_ms": _elapsed_ms(start),
+    }
+    if ok:
+        data["error_type"] = ""
+        data["error"] = ""
+    else:
+        error_types = {
+            str(item.get("error_type") or "provider_error")
+            for item in results
+            if not item.get("ok")
+        }
+        data["error_type"] = "config_error" if "config_error" in error_types else "provider_error"
+        data["error"] = "No embedding model could be calibrated. See model_results for per-model errors."
+    return data
 
 
 def _primary_search_exception_result(
@@ -1468,39 +2721,17 @@ def _primary_search_error_result(
 
 async def fetch(url: str) -> dict[str, Any]:
     start = time.time()
-    attempts: list[dict] = []
-    tavily_start = time.time()
-    tavily_result = await call_tavily_extract(url)
-    if tavily_result:
-        attempts.append(_attempt("web_fetch", "tavily", "ok", tavily_start, result_count=1))
+    fetch_result, attempts = await _run_web_fetch_fallback(url)
+    if fetch_result:
         return {
-            "ok": True,
-            "url": url,
-            "provider": "tavily",
-            "content": tavily_result,
+            **fetch_result,
             "provider_attempts": attempts,
-            "fallback_used": False,
+            "fallback_used": _fallback_used(attempts),
             "elapsed_ms": _elapsed_ms(start),
         }
-    attempts.append(_attempt("web_fetch", "tavily", "empty", tavily_start))
 
-    firecrawl_start = time.time()
-    firecrawl_result = await call_firecrawl_scrape(url)
-    if firecrawl_result:
-        attempts.append(_attempt("web_fetch", "firecrawl", "ok", firecrawl_start, result_count=1))
-        return {
-            "ok": True,
-            "url": url,
-            "provider": "firecrawl",
-            "content": firecrawl_result,
-            "provider_attempts": attempts,
-            "fallback_used": True,
-            "elapsed_ms": _elapsed_ms(start),
-        }
-    attempts.append(_attempt("web_fetch", "firecrawl", "empty", firecrawl_start))
-
-    if not config.tavily_api_key and not config.firecrawl_api_key:
-        error = "TAVILY_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
+    if not (config.tavily_api_key or config.jina_api_key or config.zhipu_mcp_api_key or config.firecrawl_api_key):
+        error = "TAVILY_API_KEY、JINA_API_KEY、ZHIPU_MCP_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
         error_type = "config_error"
     else:
         error = "所有提取服务均未能获取内容"
@@ -1580,11 +2811,11 @@ def _anysearch_provider() -> AnySearchProvider:
     return AnySearchProvider(config.anysearch_api_url, config.anysearch_api_key, config.anysearch_timeout)
 
 
-async def _decode_provider_json(raw: str) -> dict[str, Any]:
+async def _decode_provider_json(raw: str, provider: str = "anysearch") -> dict[str, Any]:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return {"ok": False, "provider": "anysearch", "error_type": "parse_error", "error": raw}
+        return {"ok": False, "provider": provider, "error_type": "parse_error", "error": raw}
 
 
 async def anysearch_domains(domain: str = "") -> dict[str, Any]:
@@ -1608,6 +2839,57 @@ async def anysearch_extract(url: str, max_length: int = 20000) -> dict[str, Any]
 
 async def anysearch_batch(queries: list[str], max_results: int = 3) -> dict[str, Any]:
     return await _decode_provider_json(await _anysearch_provider().batch_search(queries, max_results=max_results))
+
+
+def _zhipu_mcp_search_provider() -> ZhipuMCPProvider:
+    return ZhipuMCPProvider(
+        config.zhipu_mcp_search_api_url,
+        config.zhipu_mcp_api_key or "",
+        config.zhipu_mcp_timeout,
+        provider_id="zhipu-mcp",
+    )
+
+
+def _zhipu_mcp_reader_provider() -> ZhipuMCPProvider:
+    return ZhipuMCPProvider(
+        config.zhipu_mcp_reader_api_url,
+        config.zhipu_mcp_api_key or "",
+        config.zhipu_mcp_timeout,
+        provider_id="zhipu-mcp-reader",
+    )
+
+
+def _zhipu_mcp_zread_provider() -> ZhipuMCPProvider:
+    return ZhipuMCPProvider(
+        config.zhipu_mcp_zread_api_url,
+        config.zhipu_mcp_api_key or "",
+        config.zhipu_mcp_timeout,
+        provider_id="zhipu-mcp-zread",
+    )
+
+
+async def jina_fetch(url: str) -> dict[str, Any]:
+    return await call_jina_reader(url)
+
+
+async def zhipu_mcp_search(query: str, count: int = 5) -> dict[str, Any]:
+    return await _decode_provider_json(await _zhipu_mcp_search_provider().web_search(query, count=count), provider="zhipu-mcp")
+
+
+async def zhipu_mcp_reader(url: str) -> dict[str, Any]:
+    return await _decode_provider_json(await _zhipu_mcp_reader_provider().web_reader(url), provider="zhipu-mcp-reader")
+
+
+async def zhipu_mcp_search_doc(repo: str, query: str, max_results: int = 5) -> dict[str, Any]:
+    return await _decode_provider_json(await _zhipu_mcp_zread_provider().search_doc(repo, query, max_results=max_results), provider="zhipu-mcp-zread")
+
+
+async def zhipu_mcp_repo_structure(repo: str, ref: str = "") -> dict[str, Any]:
+    return await _decode_provider_json(await _zhipu_mcp_zread_provider().get_repo_structure(repo, ref=ref), provider="zhipu-mcp-zread")
+
+
+async def zhipu_mcp_read_file(repo: str, path: str, ref: str = "") -> dict[str, Any]:
+    return await _decode_provider_json(await _zhipu_mcp_zread_provider().read_file(repo, path, ref=ref), provider="zhipu-mcp-zread")
 
 
 async def exa_find_similar(url: str, num_results: int = 5) -> dict[str, Any]:
@@ -2129,6 +3411,21 @@ async def _test_tavily_connection() -> dict[str, Any]:
         return {"status": "warning", "message": f"HTTP {resp.status_code}: {resp.text[:100]}", "response_time_ms": response_time}
 
 
+async def _test_jina_connection() -> dict[str, Any]:
+    if config.jina_respond_with and not config.jina_api_key:
+        return {"status": "config_error", "message": "JINA_RESPOND_WITH requires JINA_API_KEY"}
+    if not config.jina_api_key:
+        return {"status": "not_configured", "message": "JINA_API_KEY 未设置，Jina 不满足 standard web_fetch；匿名 Reader 只能作为显式实验使用"}
+    start = time.time()
+    data = await jina_fetch("https://example.com")
+    response_time = _elapsed_ms(start)
+    if data.get("ok"):
+        return {"status": "ok", "message": "Jina Reader 可用", "response_time_ms": response_time}
+    error_type = data.get("error_type", "")
+    status = error_type if error_type in {"auth_error", "config_error", "parameter_error", "rate_limited", "timeout"} else "warning"
+    return {"status": status, "message": data.get("error", "Jina Reader 不可用"), "response_time_ms": response_time}
+
+
 async def _test_zhipu_connection() -> dict[str, Any]:
     if not config.zhipu_api_key:
         return {"status": "not_configured", "message": "ZHIPU_API_KEY 未设置，智谱搜索功能不可用"}
@@ -2136,6 +3433,17 @@ async def _test_zhipu_connection() -> dict[str, Any]:
     if result.get("ok"):
         return {"status": "ok", "message": "智谱 Web Search 可用", "response_time_ms": result.get("elapsed_ms", 0)}
     return {"status": "warning", "message": result.get("error", "智谱 Web Search 不可用"), "response_time_ms": result.get("elapsed_ms", 0)}
+
+
+async def _test_zhipu_mcp_connection() -> dict[str, Any]:
+    if not config.zhipu_mcp_api_key:
+        return {"status": "not_configured", "message": "ZHIPU_MCP_API_KEY 未设置，智谱 Coding Plan MCP 功能不可用"}
+    result = await zhipu_mcp_search("test", count=1)
+    if result.get("ok"):
+        return {"status": "ok", "message": "智谱 Coding Plan MCP 可用", "response_time_ms": result.get("elapsed_ms", 0)}
+    error_type = result.get("error_type", "")
+    status = error_type if error_type in {"auth_error", "config_error", "provider_error", "rate_limited", "timeout"} else "warning"
+    return {"status": status, "message": result.get("error", "智谱 Coding Plan MCP 不可用"), "response_time_ms": result.get("elapsed_ms", 0)}
 
 
 async def _test_context7_connection() -> dict[str, Any]:
@@ -2183,6 +3491,13 @@ async def doctor() -> dict[str, Any]:
     except Exception as e:
         info["tavily_connection_test"] = {"status": "error", "message": str(e)}
 
+    try:
+        info["jina_connection_test"] = await _test_jina_connection()
+    except httpx.TimeoutException:
+        info["jina_connection_test"] = {"status": "timeout", "message": "Jina Reader 请求超时"}
+    except Exception as e:
+        info["jina_connection_test"] = {"status": "error", "message": str(e)}
+
     if config.firecrawl_api_key:
         info["firecrawl_connection_test"] = {"status": "configured", "message": "FIRECRAWL_API_KEY 已设置"}
     else:
@@ -2196,6 +3511,13 @@ async def doctor() -> dict[str, Any]:
         info["zhipu_connection_test"] = {"status": "error", "message": str(e)}
 
     try:
+        info["zhipu_mcp_connection_test"] = await _test_zhipu_mcp_connection()
+    except httpx.TimeoutException:
+        info["zhipu_mcp_connection_test"] = {"status": "timeout", "message": "智谱 Coding Plan MCP 请求超时"}
+    except Exception as e:
+        info["zhipu_mcp_connection_test"] = {"status": "error", "message": str(e)}
+
+    try:
         info["context7_connection_test"] = await _test_context7_connection()
     except httpx.TimeoutException:
         info["context7_connection_test"] = {"status": "timeout", "message": "Context7 API 请求超时"}
@@ -2206,6 +3528,7 @@ async def doctor() -> dict[str, Any]:
     info["capability_status"] = minimum.get("capability_status", get_capability_status())
     info["minimum_profile_ok"] = minimum.get("ok", False)
     info["minimum_profile_missing"] = minimum.get("missing", [])
+    info["intent_router_status"] = intent_router_status()
     main_connection_tests = info.get("main_search_connection_tests") or {}
     main_search_statuses = [item.get("status") for item in main_connection_tests.values() if isinstance(item, dict)]
     primary_test = info.get("primary_connection_test", {})
@@ -2316,9 +3639,9 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
             "fallback_chain": MAIN_SEARCH_FALLBACK_CHAIN,
             "ok": True,
         },
-        "web_search": {"configured": ["zhipu"], "fallback_chain": ["zhipu", "tavily", "firecrawl"], "ok": True},
+        "web_search": {"configured": ["zhipu"], "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"], "ok": True},
         "docs_search": {"configured": ["context7"], "fallback_chain": ["context7", "exa"], "ok": True},
-        "web_fetch": {"configured": ["tavily"], "fallback_chain": ["tavily", "firecrawl"], "ok": True},
+        "web_fetch": {"configured": ["tavily"], "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"], "ok": True},
         "vertical_search": {"configured": [], "fallback_chain": ["anysearch"], "ok": False, "experimental": True},
     }
     minimum = _minimum_profile_result("standard", minimum_status)
@@ -2375,28 +3698,28 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
     general_route = {
         "docs_intent": _is_docs_intent("today AI news"),
         "zh_current_intent": _is_zh_current_intent("today AI news"),
-        "web_current_intent": _is_zh_current_intent("today AI news"),
+        "web_current_intent": _is_web_current_intent("today AI news"),
         "supplemental_paths": [],
     }
     cases.append(_case("search balanced avoids context7 for general query", not general_route["docs_intent"], {"routing_decision": general_route}))
 
     docs_route = {
         "docs_intent": _is_docs_intent("React useEffect API docs"),
-        "web_current_intent": _is_zh_current_intent("React useEffect API docs"),
+        "web_current_intent": _is_web_current_intent("React useEffect API docs"),
         "supplemental_paths": ["docs_search"],
     }
     cases.append(_case("search docs intent uses docs route", docs_route["docs_intent"], {"routing_decision": docs_route}))
 
     zh_route = {
         "zh_current_intent": _is_zh_current_intent("今天国内 AI 新闻"),
-        "web_current_intent": _is_zh_current_intent("今天国内 AI 新闻"),
+        "web_current_intent": _is_web_current_intent("今天国内 AI 新闻"),
         "supplemental_paths": ["web_search"],
     }
     cases.append(_case("search zh current intent uses zhipu reinforcement", zh_route["zh_current_intent"], {"routing_decision": zh_route}))
 
     sports_route = {
         "zh_current_intent": _is_zh_current_intent("nba战报"),
-        "web_current_intent": _is_zh_current_intent("nba战报"),
+        "web_current_intent": _is_web_current_intent("nba战报"),
         "supplemental_paths": ["web_search"],
     }
     cases.append(_case("search sports current intent uses web reinforcement", sports_route["web_current_intent"], {"routing_decision": sports_route}))
@@ -2511,7 +3834,7 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
         {
             **minimum_status,
             "docs_search": {"configured": [], "fallback_chain": ["context7", "exa"], "ok": False},
-            "web_fetch": {"configured": [], "fallback_chain": ["tavily", "firecrawl"], "ok": False},
+            "web_fetch": {"configured": [], "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"], "ok": False},
         },
     )
     cases.append(
@@ -2528,6 +3851,76 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
             "deep_research fixed topic recipes are examples not schema",
             schema_modes.isdisjoint(fixed_recipe_ids) and "deep_research" in schema_modes,
             {"schema_modes": sorted(schema_modes), "not_schema_modes": sorted(fixed_recipe_ids)},
+        )
+    )
+
+    mock_research_status = {
+        **minimum_status,
+        "web_search": {
+            "configured": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
+            "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
+            "ok": True,
+        },
+        "docs_search": {"configured": ["context7", "exa"], "fallback_chain": ["context7", "exa"], "ok": True},
+        "web_fetch": {
+            "configured": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
+            "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
+            "ok": True,
+        },
+        "vertical_search": {"configured": ["anysearch"], "fallback_chain": ["anysearch"], "ok": True, "experimental": True},
+    }
+    docs_routes = _research_capability_routes("React useEffect API docs", docs_plan, "auto", capability_status=mock_research_status)
+    zh_routes = _research_capability_routes("今天国内 AI 政策最新公告", market_plan, "auto", capability_status=mock_research_status)
+    pdf_fetch_order = _research_fetch_order("summarize https://arxiv.org/pdf/2401.00001.pdf", capability_status=mock_research_status)
+    dynamic_fetch_order = _research_fetch_order("dynamic javascript cloudflare page", "https://example.com/app", capability_status=mock_research_status)
+    vertical_routes = _research_capability_routes("CVE OpenSSL 漏洞影响范围", claim_plan, "auto", capability_status=mock_research_status)
+
+    cases.append(
+        _case(
+            "research router docs api prefers context7 then exa",
+            docs_routes["capabilities"]["docs_search"]["providers"][:2] == ["context7", "exa"]
+            and docs_routes["capabilities"]["vertical_search"]["providers"] == [],
+            {"routing_decision": docs_routes},
+        )
+    )
+    cases.append(
+        _case(
+            "research router chinese current prefers zhipu web_search",
+            zh_routes["capabilities"]["web_search"]["providers"][0] == "zhipu",
+            {"routing_decision": zh_routes},
+        )
+    )
+    cases.append(
+        _case(
+            "research router known url pdf favors jina fetch",
+            pdf_fetch_order[0] == "jina",
+            {"fetch_order": pdf_fetch_order},
+        )
+    )
+    cases.append(
+        _case(
+            "research router js heavy favors firecrawl fetch",
+            dynamic_fetch_order[0] == "firecrawl",
+            {"fetch_order": dynamic_fetch_order},
+        )
+    )
+    cases.append(
+        _case(
+            "research router vertical intent uses anysearch only when matched",
+            vertical_routes["capabilities"]["vertical_search"]["providers"] == ["anysearch"],
+            {"routing_decision": vertical_routes},
+        )
+    )
+
+    research_fallback_attempts = [
+        _attempt("web_fetch", "jina", "empty", time.time()),
+        _attempt("web_fetch", "firecrawl", "ok", time.time(), result_count=1),
+    ]
+    cases.append(
+        _case(
+            "research fallback remains same capability",
+            _fallback_used(research_fallback_attempts),
+            {"provider_attempts": research_fallback_attempts},
         )
     )
 

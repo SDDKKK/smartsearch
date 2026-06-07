@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 import httpx
 import pytest
@@ -19,6 +20,20 @@ def _reset_config(monkeypatch, tmp_path):
         "XAI_API_KEY",
         "XAI_MODEL",
         "XAI_TOOLS",
+        "OPENAI_COMPATIBLE_API_URL",
+        "OPENAI_COMPATIBLE_API_KEY",
+        "OPENAI_COMPATIBLE_MODEL",
+        "OPENAI_COMPATIBLE_STREAM",
+        "SMART_SEARCH_INTENT_ROUTER",
+        "INTENT_EMBEDDING_API_URL",
+        "INTENT_EMBEDDING_API_KEY",
+        "INTENT_EMBEDDING_MODEL",
+        "INTENT_EMBEDDING_THRESHOLD",
+        "INTENT_EMBEDDING_MARGIN",
+        "INTENT_CLASSIFIER_API_URL",
+        "INTENT_CLASSIFIER_API_KEY",
+        "INTENT_CLASSIFIER_MODEL",
+        "INTENT_ROUTER_TIMEOUT_SECONDS",
         "EXA_API_KEY",
         "EXA_BASE_URL",
         "ANYSEARCH_API_KEY",
@@ -28,6 +43,15 @@ def _reset_config(monkeypatch, tmp_path):
         "ZHIPU_API_URL",
         "ZHIPU_SEARCH_ENGINE",
         "ZHIPU_TIMEOUT_SECONDS",
+        "ZHIPU_MCP_API_KEY",
+        "ZHIPU_MCP_SEARCH_API_URL",
+        "ZHIPU_MCP_READER_API_URL",
+        "ZHIPU_MCP_ZREAD_API_URL",
+        "ZHIPU_MCP_TIMEOUT_SECONDS",
+        "JINA_API_KEY",
+        "JINA_READER_API_URL",
+        "JINA_RESPOND_WITH",
+        "JINA_TIMEOUT_SECONDS",
         "TAVILY_API_KEY",
         "TAVILY_API_URL",
         "FIRECRAWL_API_KEY",
@@ -104,98 +128,157 @@ def test_openai_compatible_stream_config_defaults_and_boolean_styles(monkeypatch
     assert service.config.openai_compatible_stream is False
 
 
-def test_legacy_openai_compatible_config_keeps_single_provider_behavior(monkeypatch, tmp_path):
+def test_intent_router_config_defaults_and_saved_values(monkeypatch, tmp_path):
     _reset_config(monkeypatch, tmp_path)
 
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay1.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "abcd1234WXYZ")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "relay-model-1")
+    assert service.config.intent_router_mode == "hybrid"
+    assert service.config.intent_embedding_api_url == ""
+    assert service.config.intent_embedding_api_key is None
+    assert service.config.intent_embedding_model == ""
+    assert service.config.intent_embedding_threshold == 0.74
+    assert service.config.intent_embedding_margin == 0.05
+    assert service.config.intent_classifier_api_url == ""
+    assert service.config.intent_classifier_api_key is None
+    assert service.config.intent_classifier_model == ""
+    assert service.config.intent_router_timeout == 8.0
 
-    configs = service._main_search_provider_configs()
+    service.config_set("SMART_SEARCH_INTENT_ROUTER", "rules")
+    service.config_set("INTENT_EMBEDDING_API_URL", "https://embed.example.com/v1/embeddings")
+    service.config_set("INTENT_EMBEDDING_API_KEY", "embed-secret")
+    service.config_set("INTENT_EMBEDDING_MODEL", "embed-model")
+    service.config_set("INTENT_EMBEDDING_THRESHOLD", "0.62")
+    service.config_set("INTENT_EMBEDDING_MARGIN", "0.08")
+    service.config_set("INTENT_CLASSIFIER_API_URL", "https://classifier.example.com/v1/chat/completions")
+    service.config_set("INTENT_CLASSIFIER_API_KEY", "classifier-secret")
+    service.config_set("INTENT_CLASSIFIER_MODEL", "intent-mini")
+    service.config_set("INTENT_ROUTER_TIMEOUT_SECONDS", "3.5")
 
-    assert service._configured_main_search_provider_ids() == ["openai-compatible"]
-    assert service.get_capability_status()["main_search"]["configured"] == ["openai-compatible"]
-    assert [item["provider"] for item in configs] == ["openai-compatible"]
+    assert service.config.intent_router_mode == "rules"
+    assert service.config.intent_embedding_api_url == "https://embed.example.com/v1/embeddings"
+    assert service.config.intent_embedding_api_key == "embed-secret"
+    assert service.config.intent_embedding_model == "embed-model"
+    assert service.config.intent_embedding_threshold == 0.62
+    assert service.config.intent_embedding_margin == 0.08
+    assert service.config.intent_classifier_api_url == "https://classifier.example.com/v1/chat/completions"
+    assert service.config.intent_classifier_api_key == "classifier-secret"
+    assert service.config.intent_classifier_model == "intent-mini"
+    assert service.config.intent_router_timeout == 3.5
+    saved = service.config_list()["values"]
+    assert saved["INTENT_EMBEDDING_API_KEY"] != "embed-secret"
+    assert saved["INTENT_CLASSIFIER_API_KEY"] != "classifier-secret"
 
 
-def test_named_openai_compatible_pool_configs_expand_ids_in_order(monkeypatch, tmp_path):
+def test_intent_router_invalid_embedding_threshold_and_margin_are_reported(monkeypatch, tmp_path):
     _reset_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("INTENT_EMBEDDING_THRESHOLD", "1.2")
+    monkeypatch.setenv("INTENT_EMBEDDING_MARGIN", "-0.1")
 
-    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok_backup")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
+    info = service.config.get_config_info()
+    status = service.intent_router_status()
 
-    configs = service._main_search_provider_configs()
-
-    assert [item["provider"] for item in configs] == [
-        "openai-compatible:grok-main",
-        "openai-compatible:grok_backup",
-    ]
-    assert [item["api_url"] for item in configs] == [
-        "https://relay1.example.com/v1",
-        "https://relay2.example.com/v1",
-    ]
-    assert [item["model"] for item in configs] == ["relay-model-1", "shared-model"]
-    assert [item["stream"] for item in configs] == [True, False]
-    assert [item["source"] for item in configs] == [
-        "OPENAI_COMPATIBLE_GROK_MAIN_*",
-        "OPENAI_COMPATIBLE_GROK_BACKUP_*",
-    ]
+    assert info["INTENT_EMBEDDING_THRESHOLD"] == 0.74
+    assert info["INTENT_EMBEDDING_MARGIN"] == 0.05
+    assert any("Invalid INTENT_EMBEDDING_THRESHOLD" in error for error in info["config_parameter_errors"])
+    assert any("Invalid INTENT_EMBEDDING_MARGIN" in error for error in info["config_parameter_errors"])
+    assert status["ok"] is False
+    assert "Invalid INTENT_EMBEDDING_THRESHOLD" in status["error"]
+    assert "Invalid INTENT_EMBEDDING_MARGIN" in status["error"]
 
 
-def test_incomplete_named_openai_compatible_pool_falls_back_to_legacy_provider(monkeypatch, tmp_path):
+def test_intent_router_invalid_timeout_is_reported_in_config_info(monkeypatch, tmp_path):
     _reset_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("INTENT_ROUTER_TIMEOUT_SECONDS", "slow")
 
-    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://legacy.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "legacysecret123")
+    info = service.config.get_config_info()
+    status = service.intent_router_status()
 
-    configs = service._main_search_provider_configs()
-
-    assert [item["provider"] for item in configs] == ["openai-compatible"]
-    assert configs[0]["api_url"] == "https://legacy.example.com/v1"
-
-
-def test_named_openai_compatible_pool_keys_round_trip_in_config_list(monkeypatch, tmp_path):
-    fake_config_file = _reset_config(monkeypatch, tmp_path)
-
-    service.config_set("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
-    service.config_set("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
-    service.config_set("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
-
-    listed = service.config_list()
-
-    assert listed["config_file"] == str(fake_config_file)
-    assert listed["values"]["OPENAI_COMPATIBLE_PROVIDERS"] == "grok-main"
-    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
-    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_KEY"] == "abcd****WXYZ"
+    assert info["INTENT_ROUTER_TIMEOUT_SECONDS"] == 8.0
+    assert any("Invalid INTENT_ROUTER_TIMEOUT_SECONDS" in error for error in info["config_parameter_errors"])
+    assert status["ok"] is False
+    assert "Invalid INTENT_ROUTER_TIMEOUT_SECONDS" in status["error"]
 
 
-def test_named_openai_compatible_hyphenated_keys_are_normalized_on_save(monkeypatch, tmp_path):
-    fake_config_file = _reset_config(monkeypatch, tmp_path)
+def test_intent_router_status_recommends_qwen3_8b_preset_until_thresholds_match(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+    service.config_set("INTENT_EMBEDDING_API_URL", "https://api.siliconflow.cn/v1/embeddings")
+    service.config_set("INTENT_EMBEDDING_API_KEY", "embed-secret")
+    service.config_set("INTENT_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-8B")
 
-    service.config_set("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
-    set_result = service.config_set("OPENAI_COMPATIBLE_GROK-MAIN_API_URL", "https://relay1.example.com/v1")
-    service.config_set("OPENAI_COMPATIBLE_GROK-MAIN_API_KEY", "abcd1234WXYZ")
+    status = service.intent_router_status()
 
-    listed = service.config_list()
-    configs = service._main_search_provider_configs()
+    assert status["embedding_preset_id"] == "qwen3-embedding-8b"
+    assert status["embedding_preset_recommended"] is True
+    assert status["embedding_preset_threshold"] == "0.475"
+    assert status["embedding_preset_margin"] == "0.053"
+    assert status["embedding_preset_commands"] == [
+        "smart-search config set INTENT_EMBEDDING_THRESHOLD 0.475",
+        "smart-search config set INTENT_EMBEDDING_MARGIN 0.053",
+    ]
 
-    assert set_result["ok"] is True
-    assert set_result["config_file"] == str(fake_config_file)
-    assert set_result["key"] == "OPENAI_COMPATIBLE_GROK_MAIN_API_URL"
-    assert set_result["value"] == "https://relay1.example.com/v1"
-    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
-    assert "OPENAI_COMPATIBLE_GROK-MAIN_API_URL" not in listed["values"]
-    assert service.config.openai_compatible_api_url == "https://relay1.example.com/v1"
-    assert [item["provider"] for item in configs] == ["openai-compatible:grok-main"]
+    service.config_set("INTENT_EMBEDDING_THRESHOLD", "0.475")
+    service.config_set("INTENT_EMBEDDING_MARGIN", "0.053")
+    status = service.intent_router_status()
+
+    assert status["embedding_preset_recommended"] is False
+    assert status["embedding_preset_commands"] == []
+    assert status["embedding_preset_threshold_matches"] is True
+    assert status["embedding_preset_margin_matches"] is True
+
+
+@pytest.mark.asyncio
+async def test_route_calibrate_records_failed_model_without_aborting(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("INTENT_EMBEDDING_API_URL", "https://embed.example.com/v1/embeddings")
+    monkeypatch.setenv("INTENT_EMBEDDING_API_KEY", "embed-secret")
+    monkeypatch.setenv("INTENT_EMBEDDING_MODEL", "configured-model")
+
+    sample_dataset = [
+        {"id": "docs-01", "query": "React docs", "expected_capabilities": ["docs_search"], "expected_label": "docs_search"},
+        {"id": "web-01", "query": "today news", "expected_capabilities": ["web_search"], "expected_label": "web_search"},
+        {"id": "none-01", "query": "rewrite this sentence", "expected_capabilities": [], "expected_label": "none"},
+    ]
+    monkeypatch.setattr(service, "_route_calibration_dataset", lambda: sample_dataset)
+
+    async def fake_embed(self, inputs):
+        if self.config.intent_embedding_model == "bad-model":
+            raise RuntimeError("model unavailable")
+        vectors = {
+            "React docs": [1.0, 0.0, 0.0],
+            "today news": [0.0, 1.0, 0.0],
+            "rewrite this sentence": [0.0, 0.0, 1.0],
+        }
+        out = []
+        for value in inputs:
+            text = value.lower()
+            if value in vectors:
+                out.append(vectors[value])
+            elif "doc" in text or "api" in text or "sdk" in text or "react" in text:
+                out.append([1.0, 0.0, 0.0])
+            elif "today" in text or "latest" in text or "新闻" in text:
+                out.append([0.0, 1.0, 0.0])
+            elif "url" in text or "http" in text:
+                out.append([0.0, 0.0, 0.9])
+            else:
+                out.append([0.0, 0.0, 1.0])
+        return out
+
+    monkeypatch.setattr(service.IntentRouter, "_embed", fake_embed)
+
+    result = await service.route_calibrate(models="good-model,bad-model")
+
+    assert result["ok"] is True
+    assert result["dataset_size"] == 3
+    assert result["recommended_model"] == "good-model"
+    assert result["failed_models"] == ["bad-model"]
+    good = result["model_results"][0]
+    bad = result["model_results"][1]
+    assert good["ok"] is True
+    assert good["dimension"] == 3
+    assert good["recommended_threshold"] is not None
+    assert "semantic_macro_f1" in good
+    assert bad["ok"] is False
+    assert bad["error_type"] == "provider_error"
+    assert "model unavailable" in bad["error"]
 
 
 def test_anysearch_config_defaults_and_saved_values(monkeypatch, tmp_path):
@@ -212,6 +295,38 @@ def test_anysearch_config_defaults_and_saved_values(monkeypatch, tmp_path):
     assert service.config.anysearch_api_url == "https://anysearch.example.com/mcp"
     assert service.config.anysearch_api_key == "as-test-secret"
     assert service.config.anysearch_timeout == 9.0
+
+
+def test_jina_and_zhipu_mcp_config_defaults_and_saved_values(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    assert service.config.jina_reader_api_url == "https://r.jina.ai"
+    assert service.config.jina_api_key is None
+    assert service.config.jina_respond_with == ""
+    assert service.config.jina_timeout == 30.0
+    assert service.config.zhipu_mcp_search_api_url == "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
+    assert service.config.zhipu_mcp_reader_api_url == "https://open.bigmodel.cn/api/mcp/web_reader/mcp"
+    assert service.config.zhipu_mcp_zread_api_url == "https://open.bigmodel.cn/api/mcp/zread/mcp"
+
+    service.config_set("JINA_API_KEY", "jina-test-secret")
+    service.config_set("JINA_READER_API_URL", "https://reader.example.com")
+    service.config_set("JINA_RESPOND_WITH", "readerlm-v2")
+    service.config_set("JINA_TIMEOUT_SECONDS", "11")
+    service.config_set("ZHIPU_MCP_API_KEY", "zmcp-test-secret")
+    service.config_set("ZHIPU_MCP_SEARCH_API_URL", "https://zmcp.example.com/search")
+    service.config_set("ZHIPU_MCP_READER_API_URL", "https://zmcp.example.com/reader")
+    service.config_set("ZHIPU_MCP_ZREAD_API_URL", "https://zmcp.example.com/zread")
+    service.config_set("ZHIPU_MCP_TIMEOUT_SECONDS", "12")
+
+    assert service.config.jina_api_key == "jina-test-secret"
+    assert service.config.jina_reader_api_url == "https://reader.example.com"
+    assert service.config.jina_respond_with == "readerlm-v2"
+    assert service.config.jina_timeout == 11.0
+    assert service.config.zhipu_mcp_api_key == "zmcp-test-secret"
+    assert service.config.zhipu_mcp_search_api_url == "https://zmcp.example.com/search"
+    assert service.config.zhipu_mcp_reader_api_url == "https://zmcp.example.com/reader"
+    assert service.config.zhipu_mcp_zread_api_url == "https://zmcp.example.com/zread"
+    assert service.config.zhipu_mcp_timeout == 12.0
 
 
 def test_environment_overrides_config_file(monkeypatch, tmp_path):
@@ -333,6 +448,220 @@ def test_deep_research_quick_budget_keeps_fetch_and_valid_subquestion_links():
     assert all(step["subquestion_id"] in subquestion_ids for step in result["steps"])
     for step in result["steps"]:
         assert step["output_path"] in step["command"]
+
+
+def _configure_research_minimum(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("JINA_API_KEY", "jina-secret")
+
+
+def _research_plan(query: str) -> dict:
+    return service.build_deep_research_plan(query, budget="deep", evidence_dir="C:/tmp/smart-search-evidence/test")
+
+
+def test_research_provider_profiles_are_registered_with_capability_boundaries():
+    profiles = service.provider_profiles()
+
+    assert profiles["jina"]["capability"] == "web_fetch"
+    assert "web_fetch" in profiles["tavily"]["capabilities"]
+    assert "web_search" in profiles["firecrawl"]["capabilities"]
+    assert profiles["jina"]["fallback_group"] == "web_fetch"
+    assert profiles["jina"]["minimum_profile_role"] == "web_fetch_with_key"
+    assert "challenge page rejection" in profiles["jina"]["quality_filters"]
+    assert "known URL extraction" in profiles["jina"]["route_reasons"]
+    assert profiles["anysearch"]["experimental"] is True
+
+
+def test_research_router_prefers_context7_for_docs_and_keeps_anysearch_out(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+
+    routes = service._research_capability_routes("React useEffect API docs", _research_plan("React useEffect API docs"), "auto")
+
+    assert routes["signals"]["docs_api_intent"] is True
+    assert routes["capabilities"]["docs_search"]["providers"][:2] == ["context7", "exa"]
+    assert routes["capabilities"]["vertical_search"]["providers"] == []
+
+
+def test_research_router_uses_zhipu_for_chinese_current_policy(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
+
+    routes = service._research_capability_routes("今天国内 AI 政策最新公告", _research_plan("今天国内 AI 政策最新公告"), "auto")
+
+    assert routes["signals"]["current_or_locale_intent"] is True
+    assert routes["capabilities"]["web_search"]["providers"][0] == "zhipu"
+
+
+def test_research_router_favors_jina_for_known_url_pdf_and_firecrawl_for_dynamic(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
+    assert service._research_fetch_order("summarize https://arxiv.org/pdf/2401.00001.pdf")[0] == "jina"
+    assert service._research_fetch_order("抓取这个 dynamic javascript cloudflare 页面", "https://example.com/app")[0] == "firecrawl"
+
+
+def test_research_router_uses_anysearch_only_for_vertical_intent(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("ANYSEARCH_API_KEY", "any-secret")
+
+    generic = service._research_capability_routes("React useEffect API docs", _research_plan("React useEffect API docs"), "auto")
+    vertical = service._research_capability_routes("CVE-2026 OpenSSL 漏洞影响范围", _research_plan("CVE-2026 OpenSSL 漏洞影响范围"), "auto")
+
+    assert generic["capabilities"]["vertical_search"]["providers"] == []
+    assert vertical["capabilities"]["vertical_search"]["providers"] == ["anysearch"]
+
+
+def test_research_overrides_cannot_move_provider_across_capability(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS", "jina,zhipu,unknown-provider")
+    monkeypatch.setenv("SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS", "tavily")
+
+    routes = service._research_capability_routes("今天国内 AI 新闻", _research_plan("今天国内 AI 新闻"), "auto")
+
+    assert "unknown-provider" in routes["invalid_provider_overrides"]
+    assert "jina" not in routes["capabilities"]["web_search"]["providers"]
+    assert "tavily" not in routes["capabilities"]["web_fetch"]["providers"]
+    assert routes["capabilities"]["web_fetch"]["providers"][0] == "jina"
+
+
+def test_research_fallback_detection_is_same_capability_only():
+    cross_capability_attempts = [
+        service._attempt("docs_search", "context7", "empty", time.time()),
+        service._attempt("web_fetch", "jina", "ok", time.time(), result_count=1),
+    ]
+    same_capability_attempts = [
+        service._attempt("web_fetch", "jina", "empty", time.time()),
+        service._attempt("web_fetch", "firecrawl", "ok", time.time(), result_count=1),
+    ]
+
+    assert service._fallback_used(cross_capability_attempts) is False
+    assert service._fallback_used(same_capability_attempts) is True
+
+
+@pytest.mark.asyncio
+async def test_research_executes_staged_evidence_only_workflow(monkeypatch, tmp_path):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
+
+    async def fake_web_search(query, count=5, providers="auto", fallback="auto"):
+        return (
+            [{"url": "https://evidence.example.com/source", "title": "Source", "provider": "zhipu"}],
+            [service._attempt("web_search", "zhipu", "ok", time.time(), result_count=1)],
+        )
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        return (
+            {"ok": True, "url": url, "provider": "jina", "content": "# Evidence\nFetched body only."},
+            [service._attempt("web_fetch", "jina", "ok", time.time(), result_count=1)],
+        )
+
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_web_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+
+    result = await service.research("今天国内 AI 新闻", evidence_dir=str(tmp_path), fallback="auto")
+
+    assert result["ok"] is True
+    assert result["query_mode"] == "research"
+    assert result["route_policy_version"] == service.RESEARCH_ROUTE_POLICY_VERSION
+    assert result["evidence_items"][0]["url"] == "https://evidence.example.com/source"
+    assert result["citations"] == [{"url": "https://evidence.example.com/source", "title": "Source", "provider": "jina"}]
+    assert "Fetched body only" in result["final_answer"]
+    assert "zhipu" in [attempt["provider"] for attempt in result["provider_attempts"]]
+    assert (tmp_path / "summary.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_research_reports_degraded_gaps_without_citing_discovery_candidates(monkeypatch, tmp_path):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
+
+    async def fake_web_search(query, count=5, providers="auto", fallback="auto"):
+        return (
+            [{"url": "https://candidate.example.com", "title": "Candidate", "provider": "zhipu"}],
+            [service._attempt("web_search", "zhipu", "ok", time.time(), result_count=1)],
+        )
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        return (
+            None,
+            [
+                service._attempt("web_fetch", "jina", "empty", time.time()),
+                service._attempt("web_fetch", "tavily", "empty", time.time()),
+            ],
+        )
+
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_web_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+
+    result = await service.research("今天国内 AI 新闻", evidence_dir=str(tmp_path), fallback="auto")
+
+    assert result["ok"] is False
+    assert result["degraded"] is True
+    assert result["citations"] == []
+    assert result["evidence_items"] == []
+    assert result["gap_check"]["status"] == "failed"
+    assert result["fallback_used"] is True
+    assert "no fetched/read evidence" in result["gap_check"]["gaps"][-1]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_research_fallback_off_limits_same_capability_fetch(monkeypatch, tmp_path):
+    _configure_research_minimum(monkeypatch)
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        attempts = [service._attempt("web_fetch", preferred_order[0], "empty", time.time())]
+        return None, attempts
+
+    async def should_not_discover(*args, **kwargs):
+        raise AssertionError("known URL with fallback off should not need discovery after fetch failure")
+
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+    monkeypatch.setattr(service, "_run_web_search_fallback", should_not_discover)
+
+    result = await service.research("https://example.com/source", evidence_dir=str(tmp_path), fallback="off")
+
+    fetch_attempts = [attempt for attempt in result["provider_attempts"] if attempt["capability"] == "web_fetch"]
+    assert [attempt["provider"] for attempt in fetch_attempts] == ["jina"]
+    assert result["fallback_used"] is False
+    assert result["gap_check"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_research_fallback_off_does_not_run_supplemental_exa(monkeypatch, tmp_path):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
+
+    async def fake_context7_library(*args, **kwargs):
+        return {"ok": False, "error_type": "", "error": "", "results": []}
+
+    async def fail_exa(*args, **kwargs):
+        raise AssertionError("research --fallback off must not run supplemental Exa outside the selected route")
+
+    async def fake_web_search(query, count=5, providers="auto", fallback="auto"):
+        return (
+            [{"url": "https://official.example.com/source", "title": "Official", "provider": "zhipu"}],
+            [service._attempt("web_search", "zhipu", "ok", time.time(), result_count=1)],
+        )
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        return (
+            {"ok": True, "url": url, "provider": preferred_order[0], "content": "# Evidence\nOfficial body."},
+            [service._attempt("web_fetch", preferred_order[0], "ok", time.time(), result_count=1)],
+        )
+
+    monkeypatch.setattr(service, "context7_library", fake_context7_library)
+    monkeypatch.setattr(service, "exa_search", fail_exa)
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_web_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+
+    result = await service.research("React official API docs", evidence_dir=str(tmp_path), fallback="off")
+
+    assert result["ok"] is True
+    assert all(attempt["provider"] != "exa" for attempt in result["provider_attempts"])
 
 
 def test_legacy_main_search_config_keys_are_rejected(monkeypatch, tmp_path):
@@ -623,6 +952,86 @@ def test_anysearch_vertical_status_is_experimental_and_not_minimum_required(monk
     assert with_anysearch["capability_status"]["vertical_search"]["configured"] == ["anysearch"]
 
 
+def test_jina_key_satisfies_web_fetch_but_anonymous_jina_does_not(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "standard")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+    monkeypatch.delenv("JINA_API_KEY", raising=False)
+    monkeypatch.setenv("JINA_READER_API_URL", "https://r.jina.ai")
+
+    without_key = service.validate_minimum_profile()
+    assert without_key["ok"] is False
+    assert "web_fetch" in without_key["missing"]
+    assert "jina" not in without_key["capability_status"]["web_fetch"]["configured"]
+
+    monkeypatch.setenv("JINA_API_KEY", "jina-test-secret")
+    with_key = service.validate_minimum_profile()
+    assert with_key["ok"] is True
+    assert with_key["missing"] == []
+    assert with_key["capability_status"]["web_fetch"]["configured"] == ["jina"]
+
+
+def test_zhipu_mcp_key_satisfies_web_search_and_reader_fetch_as_separate_provider(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "standard")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("ZHIPU_MCP_API_KEY", "zmcp-test-secret")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+
+    result = service.validate_minimum_profile()
+
+    assert result["ok"] is True
+    assert result["missing"] == []
+    assert result["capability_status"]["web_search"]["configured"] == ["zhipu-mcp"]
+    assert result["capability_status"]["web_search"]["fallback_chain"] == ["zhipu", "zhipu-mcp", "tavily", "firecrawl"]
+    assert result["capability_status"]["web_fetch"]["configured"] == ["zhipu-mcp-reader"]
+
+
+@pytest.mark.asyncio
+async def test_zhipu_mcp_web_search_error_records_attempt_and_falls_back_same_capability(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "standard")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    monkeypatch.setenv("ZHIPU_MCP_API_KEY", "zmcp-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def failing_zhipu_mcp(query, count=5):
+        return {
+            "ok": False,
+            "provider": "zhipu-mcp",
+            "tool": "web_search_prime",
+            "error_type": "provider_error",
+            "error": "provider unavailable",
+        }
+
+    async def yes_tavily(query, max_results=6):
+        return [{"url": "https://fallback.example.com", "title": "Fallback", "content": "fallback source"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "zhipu_mcp_search", failing_zhipu_mcp)
+    monkeypatch.setattr(service, "call_tavily_search", yes_tavily)
+
+    result = await service.search("latest MCP status", validation="strict")
+
+    web_attempts = [attempt for attempt in result["provider_attempts"] if attempt["capability"] == "web_search"]
+    assert result["ok"] is True
+    assert [attempt["provider"] for attempt in web_attempts[:2]] == ["zhipu-mcp", "tavily"]
+    assert web_attempts[0]["status"] == "error"
+    assert web_attempts[0]["error_type"] == "provider_error"
+    assert web_attempts[1]["status"] == "ok"
+    assert result["extra_sources"][0]["provider"] == "tavily"
+
+
 @pytest.mark.asyncio
 async def test_search_provider_filter_can_select_openai_compatible(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
@@ -643,50 +1052,6 @@ async def test_search_provider_filter_can_select_openai_compatible(monkeypatch):
     assert result["ok"] is True
     assert result["routing_decision"]["main_search_chain"] == ["openai-compatible"]
     assert [a["provider"] for a in result["provider_attempts"]] == ["OpenAI-compatible"]
-
-
-@pytest.mark.asyncio
-async def test_search_falls_through_openai_compatible_pool_in_order(monkeypatch, tmp_path):
-    _reset_config(monkeypatch, tmp_path)
-
-    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok-backup")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
-    captured = []
-
-    async def pooled_openai(self, query, platform="", ctx=None):
-        captured.append((self.api_url, self.api_key, self.model, self.stream))
-        if self.api_url == "https://relay1.example.com/v1":
-            request = httpx.Request("POST", f"{self.api_url}/chat/completions")
-            response = httpx.Response(503, text="relay1 unavailable", request=request)
-            raise httpx.HTTPStatusError("relay1 unavailable", request=request, response=response)
-        return 'Fallback answer.\n\nsources([{"url":"https://fallback.example.com","title":"Fallback"}])'
-
-    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", pooled_openai)
-
-    result = await service.search("what is example")
-
-    assert result["ok"] is True
-    assert result["content"] == "Fallback answer."
-    assert result["fallback_used"] is True
-    assert result["routing_decision"]["main_search_chain"] == [
-        "openai-compatible:grok-main",
-        "openai-compatible:grok-backup",
-    ]
-    assert result["capability_status"]["main_search"]["configured"] == [
-        "openai-compatible:grok-main",
-        "openai-compatible:grok-backup",
-    ]
-    assert captured == [
-        ("https://relay1.example.com/v1", "abcd1234WXYZ", "relay-model-1", True),
-        ("https://relay2.example.com/v1", "pqrs5678LMNO", "shared-model", False),
-    ]
 
 
 @pytest.mark.asyncio
@@ -797,6 +1162,37 @@ async def test_strict_still_uses_web_search_without_current_keyword(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_search_vertical_intent_uses_anysearch_when_configured(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("ANYSEARCH_API_KEY", "as-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "CVE answer."
+
+    async def fake_anysearch(query, domain="", sub_domain="", max_results=5):
+        return {
+            "ok": True,
+            "provider": "anysearch",
+            "tool": "search",
+            "results": [{"url": "https://cve.example.com/openssl", "title": "OpenSSL CVE", "description": "impact"}],
+        }
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "anysearch_search", fake_anysearch)
+
+    result = await service.search("CVE-2026 OpenSSL 漏洞影响范围", validation="balanced")
+
+    assert result["ok"] is True
+    assert "vertical_search" in result["routing_decision"]["required_capabilities"]
+    assert "vertical_search" in result["routing_decision"]["supplemental_paths"]
+    assert any(attempt["capability"] == "vertical_search" and attempt["provider"] == "anysearch" and attempt["status"] == "ok" for attempt in result["provider_attempts"])
+    assert any(source["provider"] == "anysearch" for source in result["extra_sources"])
+
+
+@pytest.mark.asyncio
 async def test_search_respects_fallback_off_for_main_search(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
@@ -863,6 +1259,8 @@ async def test_search_reports_primary_provider_http_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_prefers_tavily(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+
     async def yes_tavily(url):
         return "# Tavily Page"
 
@@ -881,6 +1279,9 @@ async def test_fetch_prefers_tavily(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_fallbacks_to_firecrawl(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
     async def no_tavily(url):
         return None
 
@@ -895,6 +1296,61 @@ async def test_fetch_fallbacks_to_firecrawl(monkeypatch):
     assert result["ok"] is True
     assert result["provider"] == "firecrawl"
     assert result["content"] == "# Page"
+
+
+@pytest.mark.asyncio
+async def test_fetch_uses_shared_chain_and_falls_back_after_jina_quality_error(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("JINA_API_KEY", "jina-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
+    async def no_tavily(url):
+        return None
+
+    async def bad_jina(url):
+        return {"ok": False, "provider": "jina", "error_type": "quality_error", "error": "challenge"}
+
+    async def yes_firecrawl(url, ctx=None):
+        return "# Page"
+
+    monkeypatch.setattr(service, "call_tavily_extract", no_tavily)
+    monkeypatch.setattr(service, "jina_fetch", bad_jina)
+    monkeypatch.setattr(service, "call_firecrawl_scrape", yes_firecrawl)
+
+    result = await service.fetch("https://example.com")
+
+    assert result["ok"] is True
+    assert result["provider"] == "firecrawl"
+    assert [a["provider"] for a in result["provider_attempts"]] == ["tavily", "jina", "firecrawl"]
+    assert result["provider_attempts"][1]["error_type"] == "quality_error"
+
+
+@pytest.mark.asyncio
+async def test_search_known_url_uses_same_fetch_chain_as_fetch(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
+    monkeypatch.setenv("JINA_API_KEY", "jina-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    captured = {}
+
+    async def yes_jina(url):
+        captured["url"] = url
+        return {"ok": True, "provider": "jina", "url": url, "content": "# Jina Page"}
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "jina_fetch", yes_jina)
+
+    result = await service.search("请抓取 https://example.com/docs?x=1 后总结", validation="balanced")
+
+    assert result["ok"] is True
+    assert captured["url"] == "https://example.com/docs?x=1"
+    attempts = [a for a in result["provider_attempts"] if a["capability"] == "web_fetch"]
+    assert [a["provider"] for a in attempts] == ["jina"]
+    assert result["extra_sources"][0]["provider"] == "jina"
 
 
 @pytest.mark.asyncio
@@ -1501,8 +1957,16 @@ async def test_doctor_tests_main_providers_independently(monkeypatch):
     async def fake_tavily_connection():
         return {"status": "ok", "message": "tavily ok"}
 
+    async def fake_jina_connection():
+        return {"status": "not_configured", "message": "missing"}
+
+    async def fake_zhipu_mcp_connection():
+        return {"status": "not_configured", "message": "missing"}
+
     monkeypatch.setattr(service, "_test_exa_connection", fake_exa_connection)
     monkeypatch.setattr(service, "_test_tavily_connection", fake_tavily_connection)
+    monkeypatch.setattr(service, "_test_jina_connection", fake_jina_connection)
+    monkeypatch.setattr(service, "_test_zhipu_mcp_connection", fake_zhipu_mcp_connection)
 
     result = await service.doctor()
 
@@ -1511,6 +1975,282 @@ async def test_doctor_tests_main_providers_independently(monkeypatch):
     assert result["main_search_connection_tests"]["xai-responses"]["status"] == "timeout"
     assert result["main_search_connection_tests"]["openai-compatible"]["status"] == "ok"
 
+
+@pytest.mark.asyncio
+async def test_jina_doctor_reports_readerlm_without_key_as_config_error(monkeypatch):
+    monkeypatch.setenv("JINA_RESPOND_WITH", "readerlm-v2")
+    monkeypatch.delenv("JINA_API_KEY", raising=False)
+
+    result = await service._test_jina_connection()
+
+    assert result["status"] == "config_error"
+    assert "JINA_API_KEY" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_call_jina_reader_decodes_provider_json(monkeypatch):
+    class FakeJinaReaderProvider:
+        def __init__(self, reader_api_url, api_key, respond_with, timeout):
+            pass
+
+        async def fetch(self, url):
+            return json.dumps({"ok": True, "provider": "jina", "url": url, "content": "# Page"})
+
+    monkeypatch.setattr(service, "JinaReaderProvider", FakeJinaReaderProvider)
+
+    result = await service.call_jina_reader("https://example.com")
+
+    assert result == {"ok": True, "provider": "jina", "url": "https://example.com", "content": "# Page"}
+
+
+@pytest.mark.asyncio
+async def test_zhipu_mcp_service_wrappers_decode_provider_json(monkeypatch):
+    calls = []
+
+    class FakeZhipuMCPProvider:
+        def __init__(self, api_url, api_key, timeout, provider_id="zhipu-mcp"):
+            calls.append(("init", provider_id, api_url, api_key, timeout))
+            self.provider_id = provider_id
+
+        async def web_search(self, query, count=5):
+            calls.append(("web_search", query, count))
+            return json.dumps({"ok": True, "provider": self.provider_id, "tool": "web_search_prime", "query": query})
+
+        async def web_reader(self, url):
+            calls.append(("web_reader", url))
+            return json.dumps({"ok": True, "provider": self.provider_id, "tool": "webReader", "url": url, "content": "# Page"})
+
+        async def search_doc(self, repo, query, max_results=5):
+            calls.append(("search_doc", repo, query, max_results))
+            return json.dumps({"ok": True, "provider": self.provider_id, "tool": "search_doc", "repo": repo})
+
+        async def get_repo_structure(self, repo, ref=""):
+            calls.append(("get_repo_structure", repo, ref))
+            return json.dumps({"ok": True, "provider": self.provider_id, "tool": "get_repo_structure", "repo": repo})
+
+        async def read_file(self, repo, path, ref=""):
+            calls.append(("read_file", repo, path, ref))
+            return json.dumps({"ok": True, "provider": self.provider_id, "tool": "read_file", "path": path})
+
+    monkeypatch.setenv("ZHIPU_MCP_API_KEY", "zmcp-test-secret")
+    monkeypatch.setenv("ZHIPU_MCP_TIMEOUT_SECONDS", "7")
+    monkeypatch.setattr(service, "ZhipuMCPProvider", FakeZhipuMCPProvider)
+
+    search = await service.zhipu_mcp_search("query", count=2)
+    reader = await service.zhipu_mcp_reader("https://example.com")
+    doc = await service.zhipu_mcp_search_doc("owner/repo", "install", max_results=3)
+    tree = await service.zhipu_mcp_repo_structure("owner/repo", ref="main")
+    file_data = await service.zhipu_mcp_read_file("owner/repo", "README.md", ref="main")
+
+    assert search["tool"] == "web_search_prime"
+    assert reader["content"] == "# Page"
+    assert doc["tool"] == "search_doc"
+    assert tree["tool"] == "get_repo_structure"
+    assert file_data["path"] == "README.md"
+    assert calls[0] == (
+        "init",
+        "zhipu-mcp",
+        "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp",
+        "zmcp-test-secret",
+        7.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tavily_doctor_connection_uses_configured_timeout(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("TAVILY_API_URL", "https://tavily.example.com/api/tavily")
+    monkeypatch.setenv("TAVILY_TIMEOUT_SECONDS", "45")
+    seen = {}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False, verify=True):
+            seen["timeout"] = timeout
+            seen["follow_redirects"] = follow_redirects
+            seen["verify"] = verify
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            seen["url"] = url
+            seen["json"] = json
+            return httpx.Response(200, json={"results": []}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await service._test_tavily_connection()
+
+    assert result["status"] == "ok"
+    assert seen["url"] == "https://tavily.example.com/api/tavily/search"
+    assert seen["timeout"].connect == 6.0
+    assert seen["timeout"].read == 45.0
+    assert seen["timeout"].write == 10.0
+    assert seen["follow_redirects"] is True
+    assert seen["verify"] is True
+
+# Local fork OpenAI-compatible provider pool regression tests.
+def test_legacy_openai_compatible_config_keeps_single_provider_behavior(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "relay-model-1")
+
+    configs = service._main_search_provider_configs()
+
+    assert service._configured_main_search_provider_ids() == ["openai-compatible"]
+    assert service.get_capability_status()["main_search"]["configured"] == ["openai-compatible"]
+    assert [item["provider"] for item in configs] == ["openai-compatible"]
+
+def test_named_openai_compatible_pool_configs_expand_ids_in_order(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok_backup")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
+
+    configs = service._main_search_provider_configs()
+
+    assert [item["provider"] for item in configs] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok_backup",
+    ]
+    assert [item["api_url"] for item in configs] == [
+        "https://relay1.example.com/v1",
+        "https://relay2.example.com/v1",
+    ]
+    assert [item["model"] for item in configs] == ["relay-model-1", "shared-model"]
+    assert [item["stream"] for item in configs] == [True, False]
+    assert [item["source"] for item in configs] == [
+        "OPENAI_COMPATIBLE_GROK_MAIN_*",
+        "OPENAI_COMPATIBLE_GROK_BACKUP_*",
+    ]
+
+def test_incomplete_named_openai_compatible_pool_falls_back_to_legacy_provider(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://legacy.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "legacysecret123")
+
+    configs = service._main_search_provider_configs()
+
+    assert [item["provider"] for item in configs] == ["openai-compatible"]
+    assert configs[0]["api_url"] == "https://legacy.example.com/v1"
+
+def test_named_openai_compatible_pool_keys_round_trip_in_config_list(monkeypatch, tmp_path):
+    fake_config_file = _reset_config(monkeypatch, tmp_path)
+
+    service.config_set("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
+    service.config_set("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    service.config_set("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+
+    listed = service.config_list()
+
+    assert listed["config_file"] == str(fake_config_file)
+    assert listed["values"]["OPENAI_COMPATIBLE_PROVIDERS"] == "grok-main"
+    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
+    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_KEY"] == "abcd****WXYZ"
+
+def test_named_openai_compatible_hyphenated_keys_are_normalized_on_save(monkeypatch, tmp_path):
+    fake_config_file = _reset_config(monkeypatch, tmp_path)
+
+    service.config_set("OPENAI_COMPATIBLE_PROVIDERS", "grok-main")
+    set_result = service.config_set("OPENAI_COMPATIBLE_GROK-MAIN_API_URL", "https://relay1.example.com/v1")
+    service.config_set("OPENAI_COMPATIBLE_GROK-MAIN_API_KEY", "abcd1234WXYZ")
+
+    listed = service.config_list()
+    configs = service._main_search_provider_configs()
+
+    assert set_result["ok"] is True
+    assert set_result["config_file"] == str(fake_config_file)
+    assert set_result["key"] == "OPENAI_COMPATIBLE_GROK_MAIN_API_URL"
+    assert set_result["value"] == "https://relay1.example.com/v1"
+    assert listed["values"]["OPENAI_COMPATIBLE_GROK_MAIN_API_URL"] == "https://relay1.example.com/v1"
+    assert "OPENAI_COMPATIBLE_GROK-MAIN_API_URL" not in listed["values"]
+    assert service.config.openai_compatible_api_url == "https://relay1.example.com/v1"
+    assert [item["provider"] for item in configs] == ["openai-compatible:grok-main"]
+
+@pytest.mark.asyncio
+async def test_search_falls_through_openai_compatible_pool_in_order(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok-backup")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
+    captured = []
+
+    async def pooled_openai(self, query, platform="", ctx=None):
+        captured.append((self.api_url, self.api_key, self.model, self.stream))
+        if self.api_url == "https://relay1.example.com/v1":
+            request = httpx.Request("POST", f"{self.api_url}/chat/completions")
+            response = httpx.Response(503, text="relay1 unavailable", request=request)
+            raise httpx.HTTPStatusError("relay1 unavailable", request=request, response=response)
+        return 'Fallback answer.\n\nsources([{"url":"https://fallback.example.com","title":"Fallback"}])'
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", pooled_openai)
+
+    result = await service.search("what is example")
+
+    assert result["ok"] is True
+    assert result["content"] == "Fallback answer."
+    assert result["fallback_used"] is True
+    assert result["routing_decision"]["main_search_chain"] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok-backup",
+    ]
+    assert result["capability_status"]["main_search"]["configured"] == [
+        "openai-compatible:grok-main",
+        "openai-compatible:grok-backup",
+    ]
+    assert captured == [
+        ("https://relay1.example.com/v1", "abcd1234WXYZ", "relay-model-1", True),
+        ("https://relay2.example.com/v1", "pqrs5678LMNO", "shared-model", False),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["nba战报", "NBA比分", "今日赛程"])
+async def test_balanced_current_sports_queries_use_web_search_reinforcement(monkeypatch, query):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Sports answer."
+
+    async def fake_tavily_search(query, max_results=6):
+        return [{"url": "https://sports.example.com", "title": "Sports", "content": "score"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", fake_tavily_search)
+
+    result = await service.search(query, validation="balanced")
+
+    assert result["ok"] is True
+    assert result["routing_decision"]["zh_current_intent"] is True
+    assert result["routing_decision"]["web_current_intent"] is True
+    assert "web_search" in result["routing_decision"]["supplemental_paths"]
+    assert any(attempt["capability"] == "web_search" and attempt["status"] == "ok" for attempt in result["provider_attempts"])
+    assert result["extra_sources"][0]["url"] == "https://sports.example.com"
 
 @pytest.mark.asyncio
 async def test_doctor_masks_pooled_openai_compatible_keys_and_reports_each_provider(monkeypatch, tmp_path):
@@ -1554,39 +2294,3 @@ async def test_doctor_masks_pooled_openai_compatible_keys_and_reports_each_provi
         "openai-compatible:grok-backup",
     ]
 
-
-@pytest.mark.asyncio
-async def test_tavily_doctor_connection_uses_configured_timeout(monkeypatch):
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
-    monkeypatch.setenv("TAVILY_API_URL", "https://tavily.example.com/api/tavily")
-    monkeypatch.setenv("TAVILY_TIMEOUT_SECONDS", "45")
-    seen = {}
-
-    class FakeAsyncClient:
-        def __init__(self, timeout, follow_redirects=False, verify=True):
-            seen["timeout"] = timeout
-            seen["follow_redirects"] = follow_redirects
-            seen["verify"] = verify
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def post(self, url, headers, json):
-            seen["url"] = url
-            seen["json"] = json
-            return httpx.Response(200, json={"results": []}, request=httpx.Request("POST", url))
-
-    monkeypatch.setattr(service.httpx, "AsyncClient", FakeAsyncClient)
-
-    result = await service._test_tavily_connection()
-
-    assert result["status"] == "ok"
-    assert seen["url"] == "https://tavily.example.com/api/tavily/search"
-    assert seen["timeout"].connect == 6.0
-    assert seen["timeout"].read == 45.0
-    assert seen["timeout"].write == 10.0
-    assert seen["follow_redirects"] is True
-    assert seen["verify"] is True

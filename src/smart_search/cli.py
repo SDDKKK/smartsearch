@@ -12,6 +12,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from . import service
+from .embedding_presets import (
+    QWEN3_EMBEDDING_8B_PRESET,
+    embedding_preset_for_model,
+)
 from .skill_installer import (
     DEFAULT_SKILL_TARGET_IDS,
     SKILL_TARGETS,
@@ -30,11 +34,17 @@ EXIT_RUNTIME_ERROR = 5
 
 COMMAND_ALIASES = {
     "search": ["s"],
+    "route": ["rt"],
     "fetch": ["f"],
     "map": ["m"],
     "exa-search": ["exa", "x"],
     "exa-similar": ["xs"],
     "zhipu-search": ["z", "zp"],
+    "zhipu-mcp-search": ["zmcp-search"],
+    "zhipu-mcp-reader": ["zmcp-reader"],
+    "zhipu-mcp-search-doc": ["zmcp-doc"],
+    "zhipu-mcp-repo-structure": ["zmcp-tree"],
+    "zhipu-mcp-read-file": ["zmcp-file"],
     "anysearch-domains": ["as-domains"],
     "anysearch-search": ["as-search", "as"],
     "anysearch-extract": ["as-extract"],
@@ -42,6 +52,8 @@ COMMAND_ALIASES = {
     "context7-library": ["c7", "ctx7"],
     "context7-docs": ["c7d", "c7docs", "ctx7-docs"],
     "deep": ["dr"],
+    "research": ["rs"],
+    "route-calibrate": ["route-cal", "rcal"],
     "smoke": ["sm"],
     "doctor": ["d"],
     "diagnose": ["diag"],
@@ -436,8 +448,10 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
     provider_tests = [
         ("exa", data.get("exa_connection_test") or {}),
         ("tavily", data.get("tavily_connection_test") or {}),
+        ("jina", data.get("jina_connection_test") or {}),
         ("firecrawl", data.get("firecrawl_connection_test") or {}),
         ("zhipu", data.get("zhipu_connection_test") or {}),
+        ("zhipu-mcp", data.get("zhipu_mcp_connection_test") or {}),
         ("context7", data.get("context7_connection_test") or {}),
     ]
     rows = []
@@ -455,6 +469,39 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
         lines.extend(["", "## Provider Checks"])
         lines.extend(_markdown_table(["Provider", "Status", "Latency", "Message"], rows))
         lines.extend(_provider_detail_lines("Provider Check Details", dict(provider_tests)))
+
+    router = data.get("intent_router_status") or {}
+    if router:
+        lines.extend(["", "## Intent Router"])
+        lines.extend(
+            _markdown_table(
+                ["Field", "Value"],
+                [
+                    ["mode", router.get("mode", "")],
+                    ["embeddings_configured", _yes_no(router.get("embeddings_configured"))],
+                    ["classifier_configured", _yes_no(router.get("classifier_configured"))],
+                    ["embedding_model", router.get("embedding_model", "")],
+                    ["embedding_threshold", router.get("embedding_threshold", "")],
+                    ["embedding_margin", router.get("embedding_margin", "")],
+                    ["embedding_threshold_source", router.get("embedding_threshold_source", "")],
+                    ["embedding_margin_source", router.get("embedding_margin_source", "")],
+                    ["embedding_preset", router.get("embedding_preset_id", "")],
+                    ["embedding_preset_threshold", router.get("embedding_preset_threshold", "")],
+                    ["embedding_preset_margin", router.get("embedding_preset_margin", "")],
+                    ["embedding_preset_recommended", _yes_no(router.get("embedding_preset_recommended"))],
+                    ["classifier_model", router.get("classifier_model", "")],
+                    ["timeout_seconds", router.get("timeout_seconds", "")],
+                    ["degrades_to_rules", _yes_no(router.get("degrades_to_rules"))],
+                ],
+            )
+        )
+        if router.get("embedding_preset_recommendation"):
+            lines.extend(["", "### Embedding Preset Recommendation", "", router.get("embedding_preset_recommendation")])
+            commands = router.get("embedding_preset_commands") or []
+            if commands:
+                lines.extend(_markdown_code_block("\n".join(str(command) for command in commands)))
+        if router.get("error"):
+            lines.append(f"Intent router error: {router.get('error')}")
 
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
@@ -566,6 +613,106 @@ def _format_diagnose_markdown(data: dict[str, Any]) -> str:
     if data.get("next_command"):
         lines.extend(["", "## Next Command"])
         lines.extend(_markdown_code_block(data.get("next_command")))
+    lines.extend(_error_lines(data))
+    return "\n".join(lines).strip() + "\n"
+
+
+def _format_route_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        "# Intent Route",
+        "",
+        f"Status: {_status_label(data.get('ok'))}",
+        f"Query: `{data.get('query', '')}`",
+        f"Mode: `{data.get('intent_router_mode', '')}`",
+        f"Executed search: {_yes_no(data.get('executed_search'))}",
+        f"Required capabilities: `{', '.join(data.get('required_capabilities') or [])}`",
+        f"Confidence: `{data.get('confidence', '')}`",
+        f"Engines: `{', '.join(data.get('router_engines_used') or [])}`",
+        f"Embedding model: `{data.get('embedding_model', '')}`",
+        f"Embedding threshold: `{data.get('embedding_threshold', '')}` ({data.get('embedding_threshold_source', '')})",
+        f"Embedding margin: `{data.get('embedding_margin', '')}` ({data.get('embedding_margin_source', '')})",
+        f"Degraded: {_yes_no(data.get('degraded'))}",
+    ]
+    if data.get("embedding_preset_recommendation"):
+        lines.extend(["", "## Embedding Preset Recommendation", "", data.get("embedding_preset_recommendation")])
+        commands = data.get("embedding_preset_commands") or []
+        if commands:
+            lines.extend(_markdown_code_block("\n".join(str(command) for command in commands)))
+    if data.get("degraded_reason"):
+        lines.append(f"Degraded reason: {data.get('degraded_reason')}")
+    reasons = data.get("reasons") or []
+    if reasons:
+        lines.extend(["", "## Reasons"])
+        for reason in reasons:
+            lines.append(f"- {reason}")
+    signals = data.get("intent_signals") or {}
+    if signals:
+        rows = [[key, value] for key, value in sorted(signals.items())]
+        lines.extend(["", "## Signals"])
+        lines.extend(_markdown_table(["Signal", "Value"], rows))
+    lines.extend(_error_lines(data))
+    return "\n".join(lines).strip() + "\n"
+
+
+def _format_route_calibrate_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        "# Route Calibration",
+        "",
+        f"Status: {_status_label(data.get('ok'))}",
+        f"Primary metric: `{data.get('primary_metric', data.get('metric', ''))}`",
+        f"Dataset size: `{data.get('dataset_size', '')}`",
+        f"Recommended model: `{data.get('recommended_model') or '-'}`",
+        f"Recommended threshold: `{data.get('recommended_threshold') if data.get('recommended_threshold') is not None else '-'}`",
+        f"Recommended margin: `{data.get('recommended_margin') if data.get('recommended_margin') is not None else '-'}`",
+    ]
+    results = data.get("model_results") or []
+    if results:
+        rows = []
+        for item in results:
+            rows.append(
+                [
+                    item.get("model", ""),
+                    _status_label(item.get("ok")),
+                    item.get("dimension", ""),
+                    _latency_text(item.get("latency_ms")),
+                    item.get("semantic_macro_f1", ""),
+                    item.get("full_route_macro_f1", ""),
+                    item.get("recommended_threshold", ""),
+                    item.get("recommended_margin", ""),
+                    item.get("error", ""),
+                ]
+            )
+        lines.extend(["", "## Models"])
+        lines.extend(
+            _markdown_table(
+                ["Model", "Status", "Dim", "Latency", "Semantic F1", "Full-route F1", "Threshold", "Margin", "Error"],
+                rows,
+            )
+        )
+    failed = data.get("failed_models") or []
+    if failed:
+        lines.extend(["", "## Failed Models"])
+        for model in failed:
+            lines.append(f"- `{model}`")
+    best = next((item for item in results if item.get("model") == data.get("recommended_model")), None)
+    if isinstance(best, dict):
+        failures = best.get("semantic_failures") or []
+        if failures:
+            lines.extend(["", "## Representative Semantic Failures"])
+            rows = []
+            for failure in failures[:8]:
+                rows.append(
+                    [
+                        failure.get("id", ""),
+                        failure.get("expected", ""),
+                        failure.get("predicted", ""),
+                        failure.get("top_capability", ""),
+                        failure.get("top_score", ""),
+                        failure.get("margin", ""),
+                        failure.get("query", ""),
+                    ]
+                )
+            lines.extend(_markdown_table(["Case", "Expected", "Predicted", "Top", "Score", "Margin", "Query"], rows))
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
@@ -761,6 +908,40 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         if gap_check:
             lines.extend(["", "## Gap Check", gap_check.get("rule", "")])
         return "\n".join(lines).strip() + "\n"
+    if command == "route":
+        return _format_route_markdown(data)
+    if command == "route-calibrate":
+        return _format_route_calibrate_markdown(data)
+    if command == "research":
+        lines = [
+            "# Research Report",
+            "",
+            f"**Question:** {data.get('question', '')}",
+            f"**Status:** {_status_label(data.get('ok'))}",
+            f"**Route policy:** {data.get('route_policy_version', '')}",
+            f"**Evidence dir:** `{data.get('evidence_dir', '')}`",
+            f"**Fallback used:** {bool(data.get('fallback_used'))}",
+            f"**Degraded:** {bool(data.get('degraded'))}",
+            "",
+            "## Answer",
+            data.get("final_answer") or data.get("content") or "",
+        ]
+        citations = data.get("citations") or []
+        if citations:
+            lines.extend(["", "## Citations"])
+            for item in citations:
+                url = item.get("url", "")
+                title = item.get("title") or url
+                provider = item.get("provider") or ""
+                lines.append(f"- [{title}]({url})" + (f" ({provider})" if provider else ""))
+        gaps = (data.get("gap_check") or {}).get("gaps") or []
+        if gaps:
+            lines.extend(["", "## Gaps"])
+            for gap in gaps:
+                reason = gap.get("reason", "")
+                url = gap.get("url", "")
+                lines.append(f"- {reason}" + (f" - {url}" if url else ""))
+        return "\n".join(lines).strip() + "\n"
     if command == "doctor":
         return _format_doctor_markdown(data)
     if command == "diagnose":
@@ -780,6 +961,11 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         "exa-search": "Exa Search",
         "exa-similar": "Exa Similar Pages",
         "zhipu-search": "Zhipu Search",
+        "zhipu-mcp-search": "Zhipu Coding Plan MCP Search",
+        "zhipu-mcp-reader": "Zhipu Coding Plan MCP Reader",
+        "zhipu-mcp-search-doc": "Zhipu Coding Plan MCP Search Doc",
+        "zhipu-mcp-repo-structure": "Zhipu Coding Plan MCP Repo Structure",
+        "zhipu-mcp-read-file": "Zhipu Coding Plan MCP Read File",
         "anysearch-domains": "AnySearch Domains",
         "anysearch-search": "AnySearch Search",
         "anysearch-extract": "AnySearch Extract",
@@ -810,7 +996,7 @@ def _plain_result_lines(data: dict[str, Any]) -> list[str]:
 
 
 def _format_content(command: str, data: dict[str, Any]) -> str:
-    if command in {"search", "fetch", "context7-docs"}:
+    if command in {"search", "fetch", "context7-docs", "research"}:
         content = data.get("content")
         if content:
             return str(content) + "\n"
@@ -820,6 +1006,43 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         if error:
             return f"{_status_label(data.get('ok'))}: {error}\n"
         return ""
+    if command == "route":
+        capabilities = ", ".join(data.get("required_capabilities") or []) or "none"
+        lines = [
+            f"Intent route {_status_label(data.get('ok'))}: capabilities={capabilities}",
+            f"mode={data.get('intent_router_mode', '')}; confidence={data.get('confidence', '')}; engines={','.join(data.get('router_engines_used') or [])}",
+            f"embedding_model={data.get('embedding_model', '')}; threshold={data.get('embedding_threshold', '')}({data.get('embedding_threshold_source', '')}); margin={data.get('embedding_margin', '')}({data.get('embedding_margin_source', '')})",
+        ]
+        if data.get("embedding_preset_recommendation"):
+            lines.append(
+                "embedding_preset_recommendation="
+                f"threshold={data.get('embedding_preset_threshold')} "
+                f"margin={data.get('embedding_preset_margin')}"
+            )
+        if data.get("degraded_reason"):
+            lines.append(f"degraded={data.get('degraded_reason')}")
+        if data.get("error"):
+            lines.append(f"Error: {_error_summary(data)}")
+        return "\n".join(lines).strip() + "\n"
+    if command == "route-calibrate":
+        results = data.get("model_results") or []
+        ok_count = sum(1 for item in results if item.get("ok"))
+        lines = [
+            f"Route calibration {_status_label(data.get('ok'))}: {ok_count}/{len(results)} models calibrated",
+            f"primary_metric={data.get('primary_metric', data.get('metric', ''))}; dataset={data.get('dataset_size', '')}",
+        ]
+        if data.get("recommended_model"):
+            lines.append(
+                "recommended="
+                f"{data.get('recommended_model')} "
+                f"threshold={data.get('recommended_threshold')} "
+                f"margin={data.get('recommended_margin')}"
+            )
+        if data.get("failed_models"):
+            lines.append("failed=" + ",".join(str(item) for item in data.get("failed_models") or []))
+        if data.get("error"):
+            lines.append(f"Error: {_error_summary(data)}")
+        return "\n".join(lines).strip() + "\n"
     if command == "deep" or data.get("mode") == "deep_research":
         lines = [
             f"Deep Research plan for: {data.get('question', '')}",
@@ -838,6 +1061,13 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         ]
         if capability_bits:
             lines.append("Capabilities: " + ", ".join(capability_bits))
+        router = data.get("intent_router_status") or {}
+        if router.get("embedding_preset_recommendation"):
+            lines.append(
+                "Embedding preset recommendation: "
+                f"threshold={router.get('embedding_preset_threshold')} "
+                f"margin={router.get('embedding_preset_margin')}"
+            )
         if data.get("error"):
             lines.append(f"Error: {_error_summary(data)}")
         return "\n".join(lines).strip() + "\n"
@@ -903,6 +1133,11 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         "exa-search",
         "exa-similar",
         "zhipu-search",
+        "zhipu-mcp-search",
+        "zhipu-mcp-reader",
+        "zhipu-mcp-search-doc",
+        "zhipu-mcp-repo-structure",
+        "zhipu-mcp-read-file",
         "anysearch-domains",
         "anysearch-search",
         "anysearch-extract",
@@ -989,6 +1224,8 @@ def _exit_code(data: dict[str, Any]) -> int:
         return EXIT_PARAMETER_ERROR
     if error_type == "network_error":
         return EXIT_NETWORK_ERROR
+    if error_type == "provider_error":
+        return EXIT_NETWORK_ERROR
     if error_type == "evidence_error":
         return EXIT_NETWORK_ERROR
     return EXIT_RUNTIME_ERROR
@@ -1032,8 +1269,11 @@ def _display_provider(provider: str, lang: str) -> str:
         "xai-responses": "xAI Responses",
         "openai-compatible": "OpenAI-compatible",
         "zhipu": _t(lang, "智谱", "Zhipu"),
+        "zhipu-mcp": _t(lang, "智谱 Coding Plan MCP", "Zhipu Coding Plan MCP"),
+        "zhipu-mcp-reader": _t(lang, "智谱 MCP Reader", "Zhipu MCP Reader"),
         "exa": "Exa",
         "context7": "Context7",
+        "jina": "Jina Reader",
         "tavily": "Tavily",
         "firecrawl": "Firecrawl",
         "anysearch": "AnySearch",
@@ -1155,6 +1395,102 @@ def _normalize_zhipu_api_url(url: str) -> str:
     return _normalize_custom_base_url(url)
 
 
+def _normalize_jina_reader_api_url(url: str) -> str:
+    return _normalize_custom_base_url(url)
+
+
+def _config_value_source(key: str) -> str:
+    getter = getattr(service.config, "get_config_source", None)
+    if callable(getter):
+        return str(getter(key))
+    return "default"
+
+
+def _current_config_value(key: str, current: dict[str, str]) -> str:
+    value = str(current.get(key, "") or "")
+    if value:
+        return value
+    if key == "INTENT_EMBEDDING_API_URL":
+        return str(getattr(service.config, "intent_embedding_api_url", "") or "")
+    if key == "INTENT_EMBEDDING_THRESHOLD":
+        try:
+            return str(getattr(service.config, "intent_embedding_threshold", "") or "")
+        except ValueError:
+            return ""
+    if key == "INTENT_EMBEDDING_MARGIN":
+        try:
+            return str(getattr(service.config, "intent_embedding_margin", "") or "")
+        except ValueError:
+            return ""
+    return ""
+
+
+def _matches_float_text(value: str, expected: str) -> bool:
+    try:
+        return abs(float(str(value).strip()) - float(expected)) < 0.0005
+    except (TypeError, ValueError):
+        return False
+
+
+def _apply_embedding_setup_preset(
+    values: dict[str, str],
+    current: dict[str, str],
+    *,
+    interactive: bool,
+    lang: str,
+) -> list[str]:
+    warnings: list[str] = []
+    merged = _merge_setup_values(current, values)
+    model = merged.get("INTENT_EMBEDDING_MODEL", "")
+    preset = embedding_preset_for_model(model)
+    if not preset:
+        return warnings
+
+    for key, preset_value in (
+        ("INTENT_EMBEDDING_API_URL", preset.api_url),
+        ("INTENT_EMBEDDING_THRESHOLD", preset.threshold),
+        ("INTENT_EMBEDDING_MARGIN", preset.margin),
+    ):
+        if values.get(key):
+            continue
+        source = _config_value_source(key)
+        current_value = _current_config_value(key, current)
+        if source == "default" or not current_value:
+            values[key] = preset_value
+            continue
+        if key == "INTENT_EMBEDDING_API_URL":
+            matches = current_value.rstrip("/") == preset_value
+        else:
+            matches = _matches_float_text(current_value, preset_value)
+        if not matches:
+            warning = (
+                f"{key} is currently {current_value}; recommended for {preset.model} is {preset_value}."
+            )
+            warnings.append(warning)
+            if interactive:
+                _write_stderr(
+                    _t(
+                        lang,
+                        f"提示: {warning}\n",
+                        f"Note: {warning}\n",
+                    )
+                )
+    return warnings
+
+
+def _has_embedding_setup_values(values: dict[str, str]) -> bool:
+    return any(
+        bool(values.get(key))
+        for key in (
+            "INTENT_EMBEDDING_API_URL",
+            "INTENT_EMBEDDING_API_KEY",
+            "INTENT_EMBEDDING_MODEL",
+            "INTENT_EMBEDDING_THRESHOLD",
+            "INTENT_EMBEDDING_MARGIN",
+        )
+    )
+
+
 def _is_tavily_hikari_key(api_key: str) -> bool:
     return api_key.strip().lower().startswith("th-")
 
@@ -1188,12 +1524,13 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
                 provider
                 for provider, configured in [
                     ("zhipu", has("ZHIPU_API_KEY")),
+                    ("zhipu-mcp", has("ZHIPU_MCP_API_KEY")),
                     ("tavily", has("TAVILY_API_KEY")),
                     ("firecrawl", has("FIRECRAWL_API_KEY")),
                 ]
                 if configured
             ],
-            "fallback_chain": ["zhipu", "tavily", "firecrawl"],
+            "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
         },
         "docs_search": {
             "configured": [
@@ -1211,11 +1548,13 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
                 provider
                 for provider, configured in [
                     ("tavily", has("TAVILY_API_KEY")),
+                    ("jina", has("JINA_API_KEY")),
+                    ("zhipu-mcp-reader", has("ZHIPU_MCP_API_KEY")),
                     ("firecrawl", has("FIRECRAWL_API_KEY")),
                 ]
                 if configured
             ],
-            "fallback_chain": ["tavily", "firecrawl"],
+            "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
         },
         "vertical_search": {
             "configured": ["anysearch"] if has("ANYSEARCH_API_KEY") else [],
@@ -1849,8 +2188,8 @@ def _prompt_web_fetch(values: dict[str, str], current: dict[str, str], lang: str
     _write_stderr(
         _t(
             lang,
-            "\n[3/3 必选] web_fetch 网页抓取\n用途: 已知 URL 抓正文；高风险事实核验必须用。\n推荐: Tavily 优先；Firecrawl 可作为抓取兜底。\n",
-            "\n[3/3 Required] web_fetch page fetch\nPurpose: extract known URLs; required for high-risk fact checks.\nRecommended: Tavily first; Firecrawl as fetch fallback.\n",
+            "\n[3/3 必选] web_fetch 网页抓取\n用途: 已知 URL 抓正文；高风险事实核验必须用。\n推荐: Tavily 优先；Jina 需要 key 才算标准配置；Firecrawl 可作为抓取兜底。\n",
+            "\n[3/3 Required] web_fetch page fetch\nPurpose: extract known URLs; required for high-risk fact checks.\nRecommended: Tavily first; Jina requires a key to satisfy standard config; Firecrawl as fetch fallback.\n",
         )
     )
     selected = _prompt_provider_multi_select(
@@ -1859,13 +2198,23 @@ def _prompt_web_fetch(values: dict[str, str], current: dict[str, str], lang: str
             "选择 web_fetch provider",
             "Choose web_fetch providers",
         ),
-        ["tavily", "firecrawl"],
+        ["tavily", "jina", "firecrawl"],
         default_selected,
         lang,
     )
     if "tavily" in selected:
         values["TAVILY_API_KEY"] = _prompt_value("TAVILY_API_KEY", "Tavily API key", current.get("TAVILY_API_KEY", ""), lang=lang)
         _prompt_tavily_api_url(values, current, lang)
+    if "jina" in selected:
+        values["JINA_API_KEY"] = _prompt_value("JINA_API_KEY", "Jina API key", current.get("JINA_API_KEY", ""), lang=lang)
+        raw_url = _prompt_value(
+            "JINA_READER_API_URL",
+            "Jina Reader API URL",
+            current.get("JINA_READER_API_URL", "https://r.jina.ai"),
+            optional=True,
+            lang=lang,
+        )
+        values["JINA_READER_API_URL"] = _normalize_jina_reader_api_url(raw_url)
     if "firecrawl" in selected:
         values["FIRECRAWL_API_KEY"] = _prompt_value(
             "FIRECRAWL_API_KEY",
@@ -1919,6 +2268,132 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         )
 
 
+def _has_intent_router_config(values: dict[str, str]) -> bool:
+    keys = {
+        "SMART_SEARCH_INTENT_ROUTER",
+        "INTENT_EMBEDDING_API_URL",
+        "INTENT_EMBEDDING_API_KEY",
+        "INTENT_EMBEDDING_MODEL",
+        "INTENT_EMBEDDING_THRESHOLD",
+        "INTENT_EMBEDDING_MARGIN",
+        "INTENT_CLASSIFIER_API_URL",
+        "INTENT_CLASSIFIER_API_KEY",
+        "INTENT_CLASSIFIER_MODEL",
+        "INTENT_ROUTER_TIMEOUT_SECONDS",
+    }
+    return any(bool(values.get(key)) for key in keys)
+
+
+def _prompt_intent_router(values: dict[str, str], current: dict[str, str], lang: str) -> None:
+    merged = _merge_setup_values(current, values)
+    _write_stderr(
+        _t(
+            lang,
+            "\n[可选增强] 智能意图路由\n用途: 先判断问题需要 docs_search、web_search、web_fetch 还是 vertical_search，再进入同能力 provider 兜底。\n说明: rules 永远可本地兜底；hybrid 可额外配置 embeddings 语义路由和 classifier 结构化分类。\n",
+            "\n[Optional] smart intent routing\nPurpose: decide whether a query needs docs_search, web_search, web_fetch, or vertical_search before same-capability provider fallback.\nNote: rules always remain the local fallback; hybrid can add semantic embeddings and structured classifier routing.\n",
+        )
+    )
+    default_configure = _has_intent_router_config(merged)
+    if not _prompt_yes_no(
+        _t(lang, "是否配置/更新智能意图路由?", "Configure or update smart intent routing?"),
+        default=default_configure,
+    ):
+        return
+
+    mode_default = values.get("SMART_SEARCH_INTENT_ROUTER") or current.get("SMART_SEARCH_INTENT_ROUTER") or "hybrid"
+    if mode_default not in {"hybrid", "rules", "off"}:
+        mode_default = "hybrid"
+    mode = _prompt_select(
+        _t(lang, "选择 intent router 模式", "Choose intent router mode"),
+        [
+            {"name": _t(lang, "hybrid: 规则 + embeddings + classifier，缺配置自动降级 rules", "hybrid: rules + embeddings + classifier, degrading to rules when optional config is missing"), "value": "hybrid"},
+            {"name": _t(lang, "rules: 只用本地规则", "rules: local rules only"), "value": "rules"},
+            {"name": _t(lang, "off: 关闭额外意图路由", "off: disable additional intent routing"), "value": "off"},
+        ],
+        mode_default,
+    )
+    values["SMART_SEARCH_INTENT_ROUTER"] = mode
+    if mode != "hybrid":
+        return
+
+    if _prompt_yes_no(
+        _t(lang, "配置 embeddings 语义路由?", "Configure embeddings semantic routing?"),
+        default=bool(merged.get("INTENT_EMBEDDING_API_URL") or merged.get("INTENT_EMBEDDING_API_KEY") or merged.get("INTENT_EMBEDDING_MODEL")),
+    ):
+        _write_stderr(
+            _t(
+                lang,
+                "推荐 preset: SiliconFlow + Qwen/Qwen3-Embedding-8B；setup 会自动使用 threshold=0.475、margin=0.053。\n",
+                "Recommended preset: SiliconFlow + Qwen/Qwen3-Embedding-8B; setup will use threshold=0.475 and margin=0.053 automatically.\n",
+            )
+        )
+        raw_url = _prompt_value(
+            "INTENT_EMBEDDING_API_URL",
+            _t(
+                lang,
+                f"Embeddings API 地址（推荐: {QWEN3_EMBEDDING_8B_PRESET.api_url}）",
+                f"Embeddings API URL (recommended: {QWEN3_EMBEDDING_8B_PRESET.api_url})",
+            ),
+            current.get("INTENT_EMBEDDING_API_URL", ""),
+            optional=True,
+            lang=lang,
+        )
+        values["INTENT_EMBEDDING_API_URL"] = _normalize_custom_base_url(raw_url)
+        values["INTENT_EMBEDDING_API_KEY"] = _prompt_value(
+            "INTENT_EMBEDDING_API_KEY",
+            "Embeddings API key",
+            current.get("INTENT_EMBEDDING_API_KEY", ""),
+            optional=True,
+            lang=lang,
+        )
+        values["INTENT_EMBEDDING_MODEL"] = _prompt_value(
+            "INTENT_EMBEDDING_MODEL",
+            _t(lang, "Embeddings 模型（推荐: Qwen/Qwen3-Embedding-8B）", "Embeddings model (recommended: Qwen/Qwen3-Embedding-8B)"),
+            current.get("INTENT_EMBEDDING_MODEL", "") or QWEN3_EMBEDDING_8B_PRESET.model,
+            optional=True,
+            lang=lang,
+        )
+
+    if _prompt_yes_no(
+        _t(lang, "配置 classifier 模型路由?", "Configure classifier model routing?"),
+        default=bool(merged.get("INTENT_CLASSIFIER_API_URL") or merged.get("INTENT_CLASSIFIER_API_KEY") or merged.get("INTENT_CLASSIFIER_MODEL")),
+    ):
+        raw_url = _prompt_value(
+            "INTENT_CLASSIFIER_API_URL",
+            _t(
+                lang,
+                "Classifier API 地址（示例: https://api.openai.com/v1/chat/completions）",
+                "Classifier API URL (example: https://api.openai.com/v1/chat/completions)",
+            ),
+            current.get("INTENT_CLASSIFIER_API_URL", ""),
+            optional=True,
+            lang=lang,
+        )
+        values["INTENT_CLASSIFIER_API_URL"] = _normalize_custom_base_url(raw_url)
+        values["INTENT_CLASSIFIER_API_KEY"] = _prompt_value(
+            "INTENT_CLASSIFIER_API_KEY",
+            "Classifier API key",
+            current.get("INTENT_CLASSIFIER_API_KEY", ""),
+            optional=True,
+            lang=lang,
+        )
+        values["INTENT_CLASSIFIER_MODEL"] = _prompt_value(
+            "INTENT_CLASSIFIER_MODEL",
+            _t(lang, "Classifier 模型", "Classifier model"),
+            current.get("INTENT_CLASSIFIER_MODEL", ""),
+            optional=True,
+            lang=lang,
+        )
+
+    values["INTENT_ROUTER_TIMEOUT_SECONDS"] = _prompt_value(
+        "INTENT_ROUTER_TIMEOUT_SECONDS",
+        _t(lang, "Intent router 超时秒数", "Intent router timeout seconds"),
+        current.get("INTENT_ROUTER_TIMEOUT_SECONDS", ""),
+        optional=True,
+        lang=lang,
+    )
+
+
 def _write_setup_keep_note(lang: str) -> None:
     _write_stderr(
         _t(
@@ -1937,11 +2412,13 @@ def _write_setup_examples(lang: str) -> None:
             "  main_search: xAI Responses，或 OpenAI-compatible（示例: https://api.openai.com/v1）\n"
             "  docs_search: 文档/API 优先 Context7；官方域名、论文和低噪声发现再配 Exa。\n"
             "  web_fetch: Tavily 官方地址是 https://api.tavily.com；号池填 https://<host>/api/tavily。\n"
+            "  intent embeddings: 推荐 SiliconFlow + Qwen/Qwen3-Embedding-8B，setup 会自动补 threshold=0.475、margin=0.053。\n"
             "  key 都填你自己控制台里的；Zhipu / Firecrawl 可以之后再补。\n",
             "\nIf unsure: first configure main_search + docs_search + web_fetch.\n"
             "  main_search: xAI Responses, or OpenAI-compatible (example: https://api.openai.com/v1)\n"
             "  docs_search: Context7 for docs/API first; add Exa for official domains, papers, and low-noise discovery.\n"
             "  web_fetch: official Tavily endpoint is https://api.tavily.com; pooled endpoints use https://<host>/api/tavily.\n"
+            "  intent embeddings: recommended SiliconFlow + Qwen/Qwen3-Embedding-8B; setup auto-fills threshold=0.475 and margin=0.053.\n"
             "  Use keys from your own provider consoles. Zhipu / Firecrawl can be added later.\n",
         )
     )
@@ -1975,6 +2452,7 @@ def _run_guided_setup_prompts(
     _prompt_docs_search(values, current, lang)
     _prompt_web_fetch(values, current, lang)
     _prompt_optional_enhancements(values, current, lang)
+    _prompt_intent_router(values, current, lang)
 
 
 def _write_skill_install_summary(result: dict[str, Any], lang: str) -> None:
@@ -2015,11 +2493,30 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("SMART_SEARCH_VALIDATION_LEVEL", "Validation level (fast/balanced/strict)", True),
         ("SMART_SEARCH_FALLBACK_MODE", "Fallback mode (auto/off)", True),
         ("SMART_SEARCH_MINIMUM_PROFILE", "Minimum profile (standard/off)", True),
+        ("SMART_SEARCH_INTENT_ROUTER", "Intent router mode (hybrid/rules/off)", True),
+        ("INTENT_EMBEDDING_API_URL", "Intent embedding API URL", True),
+        ("INTENT_EMBEDDING_API_KEY", "Intent embedding API key", True),
+        ("INTENT_EMBEDDING_MODEL", "Intent embedding model", True),
+        ("INTENT_EMBEDDING_THRESHOLD", "Intent embedding threshold (0-1)", True),
+        ("INTENT_EMBEDDING_MARGIN", "Intent embedding margin (0-1)", True),
+        ("INTENT_CLASSIFIER_API_URL", "Intent classifier API URL", True),
+        ("INTENT_CLASSIFIER_API_KEY", "Intent classifier API key", True),
+        ("INTENT_CLASSIFIER_MODEL", "Intent classifier model", True),
+        ("INTENT_ROUTER_TIMEOUT_SECONDS", "Intent router timeout seconds", True),
         ("EXA_API_KEY", "Exa API key", True),
         ("CONTEXT7_API_KEY", "Context7 API key", True),
         ("ZHIPU_API_KEY", "Zhipu API key", True),
         ("ZHIPU_API_URL", "Zhipu Web Search API URL", True),
         ("ZHIPU_SEARCH_ENGINE", "Zhipu search service (search_std/search_pro/search_pro_sogou/search_pro_quark/custom)", True),
+        ("ZHIPU_MCP_API_KEY", "Zhipu Coding Plan MCP API key", True),
+        ("ZHIPU_MCP_SEARCH_API_URL", "Zhipu Coding Plan search MCP URL", True),
+        ("ZHIPU_MCP_READER_API_URL", "Zhipu Coding Plan reader MCP URL", True),
+        ("ZHIPU_MCP_ZREAD_API_URL", "Zhipu Coding Plan zread MCP URL", True),
+        ("ZHIPU_MCP_TIMEOUT_SECONDS", "Zhipu Coding Plan MCP timeout seconds", True),
+        ("JINA_API_KEY", "Jina API key", True),
+        ("JINA_READER_API_URL", "Jina Reader API URL", True),
+        ("JINA_RESPOND_WITH", "Jina respond-with mode (optional, e.g. readerlm-v2)", True),
+        ("JINA_TIMEOUT_SECONDS", "Jina timeout seconds", True),
         ("TAVILY_API_URL", "Tavily API URL", True),
         ("TAVILY_API_KEY", "Tavily API key", True),
         ("FIRECRAWL_API_URL", "Firecrawl API URL", True),
@@ -2038,6 +2535,10 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
             value = _normalize_firecrawl_api_url(value)
         elif key == "ZHIPU_API_URL":
             value = _normalize_zhipu_api_url(value)
+        elif key == "JINA_READER_API_URL":
+            value = _normalize_jina_reader_api_url(value)
+        elif key in {"ZHIPU_MCP_SEARCH_API_URL", "ZHIPU_MCP_READER_API_URL", "ZHIPU_MCP_ZREAD_API_URL"}:
+            value = _normalize_custom_base_url(value)
         values[key] = value
     _prompt_openai_compatible_named_provider_pool_advanced(values, current, lang)
 
@@ -2063,6 +2564,12 @@ async def _run_async(args: argparse.Namespace) -> int:
             data = _search_timeout_result(args.query, args.timeout, search_kwargs)
             return _print_result("search", data, args.format, args.output)
         return _print_result("search", data, args.format, args.output)
+    if args.command == "route":
+        data = await service.route(args.query, validation=args.validation, mode=args.router_mode)
+        return _print_result("route", data, args.format, args.output)
+    if args.command == "route-calibrate":
+        data = await service.route_calibrate(models=args.models)
+        return _print_result("route-calibrate", data, args.format, args.output)
     if args.command == "fetch":
         data = await service.fetch(args.url)
         return _print_result("fetch", data, args.format, args.output)
@@ -2102,6 +2609,21 @@ async def _run_async(args: argparse.Namespace) -> int:
             content_size=args.content_size,
         )
         return _print_result("zhipu-search", data, args.format, args.output)
+    if args.command == "zhipu-mcp-search":
+        data = await service.zhipu_mcp_search(args.query, count=args.count)
+        return _print_result("zhipu-mcp-search", data, args.format, args.output)
+    if args.command == "zhipu-mcp-reader":
+        data = await service.zhipu_mcp_reader(args.url)
+        return _print_result("zhipu-mcp-reader", data, args.format, args.output)
+    if args.command == "zhipu-mcp-search-doc":
+        data = await service.zhipu_mcp_search_doc(args.repo, args.query, max_results=args.max_results)
+        return _print_result("zhipu-mcp-search-doc", data, args.format, args.output)
+    if args.command == "zhipu-mcp-repo-structure":
+        data = await service.zhipu_mcp_repo_structure(args.repo, ref=args.ref)
+        return _print_result("zhipu-mcp-repo-structure", data, args.format, args.output)
+    if args.command == "zhipu-mcp-read-file":
+        data = await service.zhipu_mcp_read_file(args.repo, args.path, ref=args.ref)
+        return _print_result("zhipu-mcp-read-file", data, args.format, args.output)
     if args.command == "anysearch-domains":
         data = await service.anysearch_domains(args.domain)
         return _print_result("anysearch-domains", data, args.format, args.output)
@@ -2132,6 +2654,14 @@ async def _run_async(args: argparse.Namespace) -> int:
             evidence_dir=args.evidence_dir,
         )
         return _print_result("deep", data, args.format, args.output)
+    if args.command == "research":
+        data = await service.research(
+            args.query,
+            budget=args.budget,
+            evidence_dir=args.evidence_dir,
+            fallback=args.fallback,
+        )
+        return _print_result("research", data, args.format, args.output)
     if args.command == "smoke":
         data = await service.smoke(args.mode)
         return _print_result("smoke", data, args.format, args.output)
@@ -2230,11 +2760,30 @@ def _run_setup(args: argparse.Namespace) -> int:
         "SMART_SEARCH_VALIDATION_LEVEL": args.validation_level,
         "SMART_SEARCH_FALLBACK_MODE": args.fallback_mode,
         "SMART_SEARCH_MINIMUM_PROFILE": args.minimum_profile,
+        "SMART_SEARCH_INTENT_ROUTER": args.intent_router,
+        "INTENT_EMBEDDING_API_URL": _normalize_custom_base_url(args.intent_embedding_api_url),
+        "INTENT_EMBEDDING_API_KEY": args.intent_embedding_api_key,
+        "INTENT_EMBEDDING_MODEL": args.intent_embedding_model,
+        "INTENT_EMBEDDING_THRESHOLD": args.intent_embedding_threshold,
+        "INTENT_EMBEDDING_MARGIN": args.intent_embedding_margin,
+        "INTENT_CLASSIFIER_API_URL": _normalize_custom_base_url(args.intent_classifier_api_url),
+        "INTENT_CLASSIFIER_API_KEY": args.intent_classifier_api_key,
+        "INTENT_CLASSIFIER_MODEL": args.intent_classifier_model,
+        "INTENT_ROUTER_TIMEOUT_SECONDS": args.intent_router_timeout,
         "EXA_API_KEY": args.exa_key,
         "CONTEXT7_API_KEY": args.context7_key,
         "ZHIPU_API_KEY": args.zhipu_key,
         "ZHIPU_API_URL": _normalize_zhipu_api_url(args.zhipu_api_url),
         "ZHIPU_SEARCH_ENGINE": args.zhipu_search_engine,
+        "ZHIPU_MCP_API_KEY": args.zhipu_mcp_key,
+        "ZHIPU_MCP_SEARCH_API_URL": _normalize_custom_base_url(args.zhipu_mcp_search_api_url),
+        "ZHIPU_MCP_READER_API_URL": _normalize_custom_base_url(args.zhipu_mcp_reader_api_url),
+        "ZHIPU_MCP_ZREAD_API_URL": _normalize_custom_base_url(args.zhipu_mcp_zread_api_url),
+        "ZHIPU_MCP_TIMEOUT_SECONDS": args.zhipu_mcp_timeout,
+        "JINA_API_KEY": args.jina_key,
+        "JINA_READER_API_URL": _normalize_jina_reader_api_url(args.jina_reader_api_url),
+        "JINA_RESPOND_WITH": args.jina_respond_with,
+        "JINA_TIMEOUT_SECONDS": args.jina_timeout,
         "TAVILY_API_URL": _normalize_tavily_flag_api_url(args.tavily_api_url, args.tavily_key),
         "TAVILY_API_KEY": args.tavily_key,
         "FIRECRAWL_API_URL": _normalize_firecrawl_api_url(args.firecrawl_api_url),
@@ -2247,21 +2796,28 @@ def _run_setup(args: argparse.Namespace) -> int:
 
     lang = args.lang if args.lang in {"zh", "en"} else "zh"
     selected_skill_targets: list[str] = list(explicit_skill_targets)
-    current = service.config_list(show_secrets=True)["values"]
+    setup_warnings: list[str] = []
+    current_for_setup = service.config_list(show_secrets=True)["values"]
 
     if args.non_interactive and not openai_compatible_provider_values and any(
         values.get(key) for key in ("OPENAI_COMPATIBLE_API_URL", "OPENAI_COMPATIBLE_API_KEY")
     ):
-        _mark_openai_compatible_pool_for_unset(values, current)
+        _mark_openai_compatible_pool_for_unset(values, current_for_setup)
 
     if not args.non_interactive:
         _write_setup_banner(args.lang if args.lang in {"zh", "en"} else "zh")
         lang = _select_setup_language(args.lang)
         if args.advanced:
-            _run_advanced_setup_prompts(values, current, lang)
+            _run_advanced_setup_prompts(values, current_for_setup, lang)
         else:
             skill_targets_for_prompt = selected_skill_targets if not args.skip_skills and not selected_skill_targets else None
-            _run_guided_setup_prompts(values, current, lang, skill_targets=skill_targets_for_prompt, show_banner=False)
+            _run_guided_setup_prompts(values, current_for_setup, lang, skill_targets=skill_targets_for_prompt, show_banner=False)
+        if _has_embedding_setup_values(values):
+            setup_warnings.extend(_apply_embedding_setup_preset(values, current_for_setup, interactive=True, lang=lang))
+    else:
+        current_for_setup = service.config_list(show_secrets=True)["values"]
+        if _has_embedding_setup_values(values):
+            setup_warnings.extend(_apply_embedding_setup_preset(values, current_for_setup, interactive=False, lang=lang))
 
     saved: dict[str, str] = {}
     for key, value in values.items():
@@ -2277,6 +2833,8 @@ def _run_setup(args: argparse.Namespace) -> int:
 
     ok = True if skill_result is None else bool(skill_result.get("ok", False))
     data = {"ok": ok, "config_file": service.config_path()["config_file"], "saved": saved}
+    if setup_warnings:
+        data["warnings"] = setup_warnings
     if skill_result is not None:
         data["skills"] = skill_result
         if not skill_result.get("ok", False):
@@ -2319,7 +2877,10 @@ def _run_regression() -> int:
         "tests/test_cli.py",
         "tests/test_service.py",
         "tests/test_providers_new.py",
+        "tests/test_jina_provider.py",
+        "tests/test_zhipu_mcp_provider.py",
         "tests/test_smoke.py",
+        "tests/test_intent_router.py",
         "tests/test_regression.py",
         "tests/test_release_workflow.py",
     ]
@@ -2359,6 +2920,33 @@ def build_parser() -> argparse.ArgumentParser:
     stream_group.add_argument("--no-stream", dest="stream", action="store_false", help="Force stream=false for OpenAI-compatible main search.")
     search_parser.add_argument("--timeout", type=float, default=90, metavar="SECONDS", help="Hard timeout in seconds.")
     _add_format_args(search_parser)
+
+    route_parser = sub.add_parser(
+        "route", aliases=COMMAND_ALIASES["route"], help="Explain intent routing without running providers."
+    )
+    route_parser.set_defaults(command="route")
+    route_parser.add_argument("query")
+    route_parser.add_argument("--validation", choices=["fast", "balanced", "strict"], default="")
+    route_parser.add_argument(
+        "--router-mode",
+        choices=["hybrid", "rules", "off"],
+        default="",
+        help="Override SMART_SEARCH_INTENT_ROUTER for this diagnostic call.",
+    )
+    _add_format_args(route_parser)
+
+    route_calibrate_parser = sub.add_parser(
+        "route-calibrate",
+        aliases=COMMAND_ALIASES["route-calibrate"],
+        help="Evaluate embedding intent-routing models and recommend threshold/margin.",
+    )
+    route_calibrate_parser.set_defaults(command="route-calibrate")
+    route_calibrate_parser.add_argument(
+        "--models",
+        default="",
+        help="Comma-separated embedding model names. Defaults to known candidates plus the configured model.",
+    )
+    _add_format_args(route_calibrate_parser)
 
     fetch_parser = sub.add_parser("fetch", aliases=COMMAND_ALIASES["fetch"], help="Fetch a URL as markdown.")
     fetch_parser.set_defaults(command="fetch")
@@ -2409,6 +2997,57 @@ def build_parser() -> argparse.ArgumentParser:
     zhipu_parser.add_argument("--search-domain-filter", default="")
     zhipu_parser.add_argument("--content-size", choices=["medium", "high"], default="medium")
     _add_format_args(zhipu_parser)
+
+    zhipu_mcp_search_parser = sub.add_parser(
+        "zhipu-mcp-search",
+        aliases=COMMAND_ALIASES["zhipu-mcp-search"],
+        help="Run Zhipu Coding Plan Remote MCP web_search_prime.",
+    )
+    zhipu_mcp_search_parser.set_defaults(command="zhipu-mcp-search")
+    zhipu_mcp_search_parser.add_argument("query")
+    zhipu_mcp_search_parser.add_argument("--count", type=int, default=5)
+    _add_format_args(zhipu_mcp_search_parser)
+
+    zhipu_mcp_reader_parser = sub.add_parser(
+        "zhipu-mcp-reader",
+        aliases=COMMAND_ALIASES["zhipu-mcp-reader"],
+        help="Run Zhipu Coding Plan Remote MCP webReader.",
+    )
+    zhipu_mcp_reader_parser.set_defaults(command="zhipu-mcp-reader")
+    zhipu_mcp_reader_parser.add_argument("url")
+    _add_format_args(zhipu_mcp_reader_parser)
+
+    zhipu_mcp_search_doc_parser = sub.add_parser(
+        "zhipu-mcp-search-doc",
+        aliases=COMMAND_ALIASES["zhipu-mcp-search-doc"],
+        help="Search repository docs through Zhipu Coding Plan zread MCP.",
+    )
+    zhipu_mcp_search_doc_parser.set_defaults(command="zhipu-mcp-search-doc")
+    zhipu_mcp_search_doc_parser.add_argument("repo")
+    zhipu_mcp_search_doc_parser.add_argument("query")
+    zhipu_mcp_search_doc_parser.add_argument("--max-results", type=int, default=5)
+    _add_format_args(zhipu_mcp_search_doc_parser)
+
+    zhipu_mcp_repo_structure_parser = sub.add_parser(
+        "zhipu-mcp-repo-structure",
+        aliases=COMMAND_ALIASES["zhipu-mcp-repo-structure"],
+        help="Read repository structure through Zhipu Coding Plan zread MCP.",
+    )
+    zhipu_mcp_repo_structure_parser.set_defaults(command="zhipu-mcp-repo-structure")
+    zhipu_mcp_repo_structure_parser.add_argument("repo")
+    zhipu_mcp_repo_structure_parser.add_argument("--ref", default="")
+    _add_format_args(zhipu_mcp_repo_structure_parser)
+
+    zhipu_mcp_read_file_parser = sub.add_parser(
+        "zhipu-mcp-read-file",
+        aliases=COMMAND_ALIASES["zhipu-mcp-read-file"],
+        help="Read a repository file through Zhipu Coding Plan zread MCP.",
+    )
+    zhipu_mcp_read_file_parser.set_defaults(command="zhipu-mcp-read-file")
+    zhipu_mcp_read_file_parser.add_argument("repo")
+    zhipu_mcp_read_file_parser.add_argument("path")
+    zhipu_mcp_read_file_parser.add_argument("--ref", default="")
+    _add_format_args(zhipu_mcp_read_file_parser)
 
     anysearch_domains_parser = sub.add_parser(
         "anysearch-domains",
@@ -2481,6 +3120,18 @@ def build_parser() -> argparse.ArgumentParser:
     deep_parser.add_argument("--budget", choices=["quick", "standard", "deep"], default="standard")
     deep_parser.add_argument("--evidence-dir", default="")
     _add_format_args(deep_parser)
+
+    research_parser = sub.add_parser(
+        "research",
+        aliases=COMMAND_ALIASES["research"],
+        help="Run live Deep Research with provider-advantage routing and evidence-only synthesis.",
+    )
+    research_parser.set_defaults(command="research")
+    research_parser.add_argument("query")
+    research_parser.add_argument("--budget", choices=["quick", "standard", "deep"], default="deep")
+    research_parser.add_argument("--evidence-dir", default="")
+    research_parser.add_argument("--fallback", choices=["auto", "off"], default="auto")
+    _add_format_args(research_parser)
 
     smoke_parser = sub.add_parser(
         "smoke", aliases=COMMAND_ALIASES["smoke"], help="Run provider routing and fallback smoke checks."
@@ -2619,11 +3270,30 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--validation-level", default="", help="Save SMART_SEARCH_VALIDATION_LEVEL.")
     setup_parser.add_argument("--fallback-mode", default="", help="Save SMART_SEARCH_FALLBACK_MODE.")
     setup_parser.add_argument("--minimum-profile", default="", help="Save SMART_SEARCH_MINIMUM_PROFILE.")
+    setup_parser.add_argument("--intent-router", default="", help="Save SMART_SEARCH_INTENT_ROUTER.")
+    setup_parser.add_argument("--intent-embedding-api-url", default="", help="Save INTENT_EMBEDDING_API_URL.")
+    setup_parser.add_argument("--intent-embedding-api-key", default="", help="Save INTENT_EMBEDDING_API_KEY.")
+    setup_parser.add_argument("--intent-embedding-model", default="", help="Save INTENT_EMBEDDING_MODEL.")
+    setup_parser.add_argument("--intent-embedding-threshold", default="", help="Save INTENT_EMBEDDING_THRESHOLD.")
+    setup_parser.add_argument("--intent-embedding-margin", default="", help="Save INTENT_EMBEDDING_MARGIN.")
+    setup_parser.add_argument("--intent-classifier-api-url", default="", help="Save INTENT_CLASSIFIER_API_URL.")
+    setup_parser.add_argument("--intent-classifier-api-key", default="", help="Save INTENT_CLASSIFIER_API_KEY.")
+    setup_parser.add_argument("--intent-classifier-model", default="", help="Save INTENT_CLASSIFIER_MODEL.")
+    setup_parser.add_argument("--intent-router-timeout", default="", help="Save INTENT_ROUTER_TIMEOUT_SECONDS.")
     setup_parser.add_argument("--exa-key", default="", help="Save EXA_API_KEY.")
     setup_parser.add_argument("--context7-key", default="", help="Save CONTEXT7_API_KEY.")
     setup_parser.add_argument("--zhipu-key", default="", help="Save ZHIPU_API_KEY.")
     setup_parser.add_argument("--zhipu-api-url", default="", help="Save ZHIPU_API_URL.")
     setup_parser.add_argument("--zhipu-search-engine", default="", help="Save ZHIPU_SEARCH_ENGINE.")
+    setup_parser.add_argument("--zhipu-mcp-key", default="", help="Save ZHIPU_MCP_API_KEY.")
+    setup_parser.add_argument("--zhipu-mcp-search-api-url", default="", help="Save ZHIPU_MCP_SEARCH_API_URL.")
+    setup_parser.add_argument("--zhipu-mcp-reader-api-url", default="", help="Save ZHIPU_MCP_READER_API_URL.")
+    setup_parser.add_argument("--zhipu-mcp-zread-api-url", default="", help="Save ZHIPU_MCP_ZREAD_API_URL.")
+    setup_parser.add_argument("--zhipu-mcp-timeout", default="", help="Save ZHIPU_MCP_TIMEOUT_SECONDS.")
+    setup_parser.add_argument("--jina-key", default="", help="Save JINA_API_KEY.")
+    setup_parser.add_argument("--jina-reader-api-url", default="", help="Save JINA_READER_API_URL.")
+    setup_parser.add_argument("--jina-respond-with", default="", help="Save JINA_RESPOND_WITH, e.g. readerlm-v2.")
+    setup_parser.add_argument("--jina-timeout", default="", help="Save JINA_TIMEOUT_SECONDS.")
     setup_parser.add_argument("--tavily-api-url", default="", help="Save TAVILY_API_URL.")
     setup_parser.add_argument("--tavily-key", default="", help="Save TAVILY_API_KEY.")
     setup_parser.add_argument("--firecrawl-api-url", default="", help="Save FIRECRAWL_API_URL.")

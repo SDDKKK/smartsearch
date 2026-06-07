@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md) | English
 
-CLI-first, skill-driven web research for AI agents and terminal users. `smart-search` gives AI tools one reproducible command layer for live search, source discovery, page fetching, site mapping, provider diagnostics, and offline Deep Research planning.
+CLI-first, skill-driven web research for AI agents and terminal users. `smart-search` gives AI tools one reproducible command layer for live search, source discovery, page fetching, site mapping, provider diagnostics, offline Deep Research planning, and live Deep Research execution.
 
 <p>
   <a href="https://www.npmjs.com/package/@konbakuyomu/smart-search">
@@ -20,6 +20,7 @@ CLI-first, skill-driven web research for AI agents and terminal users. `smart-se
 smart-search search "latest OpenAI Responses API changes" --format json
 smart-search fetch "https://example.com/article" --format markdown
 smart-search deep "Compare Responses API web_search with Chat Completions search" --format json
+smart-search research "Compare Responses API web_search with Chat Completions search" --format markdown
 ```
 
 The current architecture has two layers:
@@ -29,7 +30,20 @@ The current architecture has two layers:
 | CLI executor | Runs deterministic commands, provider routing, fallback, JSON/Markdown output, local config, smoke/regression checks |
 | Skill / AI orchestration | Infers user intent, chooses normal search vs Deep Research, executes planned CLI steps, writes final source-backed answers |
 
-Default `smart-search search` stays fast and live. `smart-search deep` is the explicit offline Deep Research planner. It does not call providers, run `doctor`, or fetch pages by default; it emits a `research_plan` that an AI agent or user can execute step by step.
+Default `smart-search search` stays fast and live. `smart-search deep` is the explicit offline Deep Research planner. It does not call providers, run `doctor`, or fetch pages by default; it emits a `research_plan` that an AI agent or user can execute step by step. `smart-search research` is the live Deep Research executor: it uses the same planner shape, then runs discovery, fetch/read, gap check, and evidence-only synthesis.
+
+Intent routing now has its own layer. Instead of letting a model pick providers directly, Smart Search first decides which capabilities are needed, then the existing capability-first provider registry chooses same-capability fallback:
+
+```text
+user query
+ -> rules: URLs, explicit docs/current/fetch/vertical signals, strict validation
+ -> semantic route: optional embeddings over capability examples
+ -> classifier route: optional structured model classification
+ -> merged required_capabilities
+ -> provider fallback inside docs_search / web_search / web_fetch / vertical_search
+```
+
+`smart-search route "query"` explains this decision without calling search, docs, fetch, or provider APIs. `smart-search deep` keeps the offline planner contract and uses local/rules signals only.
 
 ## Install
 
@@ -77,19 +91,32 @@ smart-search diagnose openai-compatible --format markdown
 smart-search search "today's important AI news" --validation balanced --extra-sources 2 --format json
 ```
 
-4. Fetch exact page evidence:
+4. Inspect intent routing without running providers:
+
+```powershell
+smart-search route "React useEffect API docs" --format markdown
+smart-search route "请核验这个链接里的说法 https://example.com/source" --format json
+```
+
+5. Fetch exact page evidence:
 
 ```powershell
 smart-search fetch "https://example.com/source" --format markdown --output evidence.md
 ```
 
-5. Plan Deep Research:
+6. Plan Deep Research:
 
 ```powershell
 smart-search deep "Deep research recent Bitcoin market movement" --budget standard --format json
 ```
 
-6. Install the skill for AI tools when setup prompts you, or explicitly:
+7. Run live Deep Research when you want the CLI to execute the staged workflow:
+
+```powershell
+smart-search research "Deep research recent Bitcoin market movement" --budget deep --format markdown
+```
+
+8. Install the skill for AI tools when setup prompts you, or explicitly:
 
 ```powershell
 smart-search setup --non-interactive --install-skills codex,claude,cursor,hermes
@@ -99,7 +126,7 @@ Skill installation writes the bundled `smart-search-cli` skill into user-level t
 `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills`, and `~/.hermes/skills`. It does not initialize
 Trellis, hooks, agents, or commands. `--skills-root PATH` is only an advanced override for portable or test installs.
 
-7. After upgrading the CLI, refresh the installed global skill:
+9. After upgrading the CLI, refresh the installed global skill:
 
 ```powershell
 smart-search skills status --targets codex --format json
@@ -116,11 +143,12 @@ provider keys or create Trellis/hooks/agents/commands.
 | --- | --- | --- | --- |
 | `main_search` | `search` | xAI Responses, OpenAI-compatible Chat Completions | Broad answer generation and synthesis |
 | `docs_search` | `context7-library`, `context7-docs`, `exa-search` | Context7, Exa | Official docs, SDKs, APIs, framework/library evidence |
-| `web_search` | `zhipu-search`, intent-routed reinforcement inside `search` | Zhipu, Tavily, Firecrawl | Chinese, domestic, current, domain-filtered, or supplementary web discovery |
-| `web_fetch` | `fetch` | Tavily, Firecrawl | Exact URL content extraction for evidence |
+| `web_search` | `zhipu-search`, `zhipu-mcp-search`, intent-routed reinforcement inside `search` | Zhipu Web Search API, Zhipu Coding Plan MCP, Tavily, Firecrawl | Chinese, domestic, current, domain-filtered, or supplementary web discovery |
+| `web_fetch` | `fetch`, `zhipu-mcp-reader` | Tavily, Jina Reader, Zhipu Coding Plan MCP Reader, Firecrawl | Exact URL content extraction for evidence |
 | `vertical_search` | `anysearch-domains`, `anysearch-search`, `anysearch-extract`, `anysearch-batch` | AnySearch (experimental) | Acceptance testing for structured vertical domains such as CVE, finance, legal, academic, and code/docs |
 | `site_map` | `map` | Tavily | Site/documentation structure discovery |
 | `deep_planner` | `deep` / `dr` | Local planner only | Offline plan generation; no provider call by default |
+| `research_executor` | `research` / `rs` | Registered providers by capability | Live staged research: plan, discover, fetch/read, gap check, evidence-only synthesis |
 
 Fallback is same-capability only:
 
@@ -128,16 +156,20 @@ Fallback is same-capability only:
 | --- | --- |
 | `main_search` | xAI Responses -> OpenAI-compatible |
 | `docs_search` | Context7 for library/API/docs intent; Exa for official domains, papers, product pages, and trusted-site discovery |
-| `web_search` | Zhipu -> Tavily -> Firecrawl |
-| `web_fetch` | Tavily -> Firecrawl |
+| `web_search` | Zhipu Web Search API -> Zhipu Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
+| `web_fetch` | Tavily -> Jina Reader with `JINA_API_KEY` -> Zhipu Coding Plan MCP `webReader` -> Firecrawl |
 
 AnySearch is intentionally not part of the `web_search` fallback chain and is not required by the `standard` minimum profile. Use its explicit commands for acceptance and boundary testing before promoting any vertical domain into a future route.
 
+Jina Reader is a `web_fetch` provider only. `JINA_API_KEY` is required before Jina satisfies `SMART_SEARCH_MINIMUM_PROFILE=standard`; anonymous `r.jina.ai` behavior is treated as explicit/experimental fetch behavior and must not weaken fail-closed setup checks.
+
 The CLI exposes observability fields such as `routing_decision`, `provider_attempts`, `providers_used`, `fallback_used`, `primary_sources`, `extra_sources`, and `source_warning`.
+
+`routing_decision` keeps backward-compatible booleans such as `docs_intent`, `zh_current_intent`, `web_current_intent`, `fetch_intent`, and `supplemental_paths`, and also includes the unified router fields: `intent_router_mode`, `required_capabilities`, `intent_signals`, `confidence`, `router_engines_used`, and `degraded_reason`.
 
 `extra_sources` are discovery candidates. For high-risk claims, news, policy, finance, health, selection decisions, and serious reviews, fetch key pages first and cite fetched text rather than treating a broad search answer as proof.
 
-Routing rule of thumb: start with `search` for broad discovery and synthesis; use Zhipu for Chinese, domestic, policy, announcements, and current-news searches; use Context7 first for library/API/framework docs; use Exa for official domains, papers, product pages, trusted sites, and low-noise discovery; use Tavily/Firecrawl through `search --extra-sources` for horizontal candidates and through `fetch` for page evidence; use AnySearch only when you explicitly need experimental vertical-domain search.
+Routing rule of thumb: start with `search` for broad discovery and synthesis; use `research` when you want the CLI to execute the deeper evidence workflow; use Zhipu Web Search API for Chinese, domestic, policy, announcements, and current-news searches; use Zhipu Coding Plan MCP only when you explicitly want the Coding Plan quota route; use Context7 first for library/API/framework docs; use Exa for official domains, papers, product pages, trusted sites, and low-noise discovery; use Tavily/Firecrawl through `search --extra-sources` for horizontal candidates and through `fetch` for page evidence; use Jina for known-URL extraction; use AnySearch only when you explicitly need experimental vertical-domain search.
 
 ## Deep Research
 
@@ -147,14 +179,14 @@ Use normal search when you want a fast answer:
 smart-search search "React useEffect cleanup docs" --format json
 ```
 
-Use Deep Research when you want planning, decomposition, cross-checking, or strict evidence:
+Use offline Deep Research planning when you want decomposition before execution:
 
 ```powershell
 smart-search deep "OpenAI Responses API web_search vs Chat Completions search: which should I use?" --budget deep --format json
 smart-search dr "https://example.com/source" --format json
 ```
 
-Deep Research output includes:
+Planner output includes:
 
 - `mode="deep_research"` and `query_mode="deep"`;
 - `intent_signals`, such as recency, docs/API intent, known URL, claim risk, source authority, and cross-validation need;
@@ -175,6 +207,28 @@ search, exa-search, exa-similar, zhipu-search, context7-library, context7-docs, 
 
 `doctor` is preflight, not a research step. `smart-search deep` itself is offline; live research starts when an agent or user executes `steps[].command`.
 
+Use live Deep Research execution when you want the CLI to run the staged workflow:
+
+```powershell
+smart-search research "OpenAI Responses API web_search vs Chat Completions search: which should I use?" --budget deep --fallback auto --format json
+smart-search rs "https://example.com/source" --fallback off --format markdown
+```
+
+`research` runs plan -> discover -> fetch/read -> gap check -> evidence-only synthesis. It defaults to `--fallback auto`, which permits same-capability fallback even when a normal `search` configuration is conservative. `--fallback off` tries only the first provider selected inside each capability, which is useful for debugging provider behavior.
+
+Research JSON includes `final_answer`, `citations`, `evidence_items`, `gap_check`, `provider_attempts`, `fallback_used`, `degraded`, `route_policy_version`, and `evidence_dir`. Discovery snippets are candidates only; citations are produced only from fetched/read evidence. If fallback cannot close a gap, `research` finishes degraded and lists unsupported gaps instead of inventing evidence.
+
+The research router is capability-first plus provider-advantage:
+
+- Context7 first for library/API/framework docs, with Exa as official-domain, paper, product, or trusted low-noise discovery.
+- Zhipu Web Search API first for Chinese, domestic, current, policy, and announcement searches.
+- Zhipu Coding Plan MCP remains a separate quota route through `web_search_prime` and `webReader`.
+- Jina is favored for known public URLs, PDFs, and arXiv extraction; ReaderLM-v2 still requires `JINA_API_KEY`.
+- Firecrawl is favored for JS-heavy, dynamic, browser-like, OCR/PDF, or robust fallback extraction.
+- AnySearch participates only when vertical intent is clear, such as CVE, finance, legal, academic, or codebase/repository searches.
+
+Advanced routing overrides are available through `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS`. They can reorder or disable registered providers inside their supported capability, but they cannot move a provider across capability boundaries.
+
 Good user-facing smoke prompts:
 
 ```powershell
@@ -187,6 +241,7 @@ smart-search deep "https://example.com/source" --format json
 ## Provider And API Key Guide
 
 Use `smart-search setup` for normal configuration. Environment variables remain supported for CI and advanced users.
+The default interactive setup wizard includes optional smart intent router prompts, so embeddings and classifier routing can be configured without `--advanced`.
 
 | Provider / route | Used for | Main config keys | Official docs | Key / dashboard |
 | --- | --- | --- | --- | --- |
@@ -195,9 +250,38 @@ Use `smart-search setup` for normal configuration. Environment variables remain 
 | Exa | Low-noise official docs, API, paper, product, trusted-page discovery | `EXA_API_KEY` | [Exa docs](https://docs.exa.ai/) | [Exa API keys](https://dashboard.exa.ai/api-keys) |
 | Context7 | SDK, library, framework, and API documentation fallback | `CONTEXT7_API_KEY`, `CONTEXT7_BASE_URL` | [Context7 docs](https://context7.com/docs) | [Context7](https://context7.com/) |
 | Zhipu Web Search API | Chinese, domestic, current, or domain-filtered web discovery | `ZHIPU_API_KEY`, `ZHIPU_API_URL`, `ZHIPU_SEARCH_ENGINE` | [Zhipu web search docs](https://docs.bigmodel.cn/cn/guide/tools/web-search) | [Zhipu API keys](https://open.bigmodel.cn/usercenter/apikeys) |
+| Zhipu Coding Plan Remote MCP | Coding Plan quota web search, page reading, and open-source repo discovery | `ZHIPU_MCP_API_KEY`, `ZHIPU_MCP_SEARCH_API_URL`, `ZHIPU_MCP_READER_API_URL`, `ZHIPU_MCP_ZREAD_API_URL` | [search MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/search-mcp-server), [reader MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/reader-mcp-server), [zread MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/zread-mcp-server) | [Zhipu API keys](https://open.bigmodel.cn/usercenter/apikeys) |
 | Tavily | Extra web sources, URL fetch, and site map | `TAVILY_API_URL`, `TAVILY_API_KEY` | [Tavily docs](https://docs.tavily.com/) | [Tavily app](https://app.tavily.com/home) |
+| Jina Reader | Known URL page extraction for `web_fetch`; key required for standard minimum profile | `JINA_API_KEY`, `JINA_READER_API_URL`, `JINA_RESPOND_WITH`, `JINA_TIMEOUT_SECONDS` | [Jina Reader](https://jina.ai/reader/) | [Jina AI](https://jina.ai/) |
 | Firecrawl | Fetch fallback and supplementary web sources | `FIRECRAWL_API_URL`, `FIRECRAWL_API_KEY` | [Firecrawl docs](https://docs.firecrawl.dev/) | [Firecrawl API keys](https://www.firecrawl.dev/app/api-keys) |
-| AnySearch | Experimental vertical search acceptance surface; not a default fallback | `ANYSEARCH_API_URL`, `ANYSEARCH_API_KEY`, `ANYSEARCH_TIMEOUT_SECONDS` | Provider documentation | AnySearch dashboard / provider console |
+| AnySearch | Experimental vertical search acceptance surface; not a default fallback | `ANYSEARCH_API_URL`, `ANYSEARCH_API_KEY`, `ANYSEARCH_TIMEOUT_SECONDS` | [AnySearch docs](https://www.anysearch.com/docs) | [AnySearch API keys](https://www.anysearch.com/console/api-keys) |
+
+Intent router configuration:
+
+| Key | Purpose |
+| --- | --- |
+| `SMART_SEARCH_INTENT_ROUTER` | `hybrid`, `rules`, or `off`; default `hybrid` |
+| `INTENT_EMBEDDING_API_URL` | Optional OpenAI-compatible embeddings endpoint for semantic capability routing; recommended setup preset uses `https://api.siliconflow.cn/v1/embeddings` |
+| `INTENT_EMBEDDING_API_KEY` | Optional embeddings API key; masked by `doctor` and config output |
+| `INTENT_EMBEDDING_MODEL` | Embeddings model name; recommended setup preset uses `Qwen/Qwen3-Embedding-8B` |
+| `INTENT_EMBEDDING_THRESHOLD` | Semantic route threshold, default `0.74`; recommended 8B setup value `0.475`; model-specific |
+| `INTENT_EMBEDDING_MARGIN` | Required top-vs-second semantic margin, default `0.05`; recommended 8B setup value `0.053`; ambiguous matches remain signals only |
+| `INTENT_CLASSIFIER_API_URL` | Optional OpenAI-compatible chat-completions endpoint for structured intent classification |
+| `INTENT_CLASSIFIER_API_KEY` | Optional classifier API key; masked by `doctor` and config output |
+| `INTENT_CLASSIFIER_MODEL` | Classifier model name |
+| `INTENT_ROUTER_TIMEOUT_SECONDS` | Timeout for optional remote router calls, default `8` |
+
+Default `hybrid` is fail-open: if embeddings or classifier settings are missing or fail, routing records `degraded_reason` and falls back to local rules. Semantic routing may add a capability only when the top similarity score is at least `INTENT_EMBEDDING_THRESHOLD` and the top-vs-second score gap is at least `INTENT_EMBEDDING_MARGIN`; otherwise it records an ambiguous signal without adding a capability. The classifier may add capabilities, but unknown capability names and provider names are ignored. Providers are still selected only by capability.
+
+For normal setup, use the Qwen3-Embedding-8B preset: `INTENT_EMBEDDING_API_URL=https://api.siliconflow.cn/v1/embeddings`, `INTENT_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B`, `INTENT_EMBEDDING_THRESHOLD=0.475`, and `INTENT_EMBEDDING_MARGIN=0.053`. `smart-search setup` automatically fills the 8B threshold/margin when the 8B model is selected and those values are not already configured.
+
+Embedding cosine scores are model-specific. Keep `route-calibrate` for advanced re-checks: run it after changing `INTENT_EMBEDDING_MODEL`, changing embedding endpoints, or expanding the real query calibration set:
+
+```powershell
+smart-search route-calibrate --models "Qwen/Qwen3-Embedding-8B" --format markdown
+```
+
+Use the report's recommended `INTENT_EMBEDDING_THRESHOLD` and `INTENT_EMBEDDING_MARGIN` before judging routing quality. The primary calibration metric is semantic-only Macro-F1; full-route Macro-F1 is reported to verify rules/classifier fallback behavior.
 
 Important boundaries:
 
@@ -206,11 +290,15 @@ Important boundaries:
 - `OPENAI_COMPATIBLE_PROVIDERS=grok-main,grok-backup` enables ordered fallback within the OpenAI-compatible lane. Each id reads `OPENAI_COMPATIBLE_<ID>_API_URL`, `_API_KEY`, optional `_MODEL`, and optional `_STREAM`; ids normalize to env suffixes (`grok-main` -> `GROK_MAIN`). If the pool is unset, the legacy single-provider keys keep their existing behavior.
 - Legacy `SMART_SEARCH_API_URL`, `SMART_SEARCH_API_KEY`, `SMART_SEARCH_API_MODE`, `SMART_SEARCH_MODEL`, and `SMART_SEARCH_XAI_TOOLS` are not supported config keys. Use `XAI_*` or `OPENAI_COMPATIBLE_*` explicitly.
 - Do not force xAI `web_search` / `x_search` tools or legacy `search_parameters` into the OpenAI-compatible Chat Completions route.
-- Zhipu support is the Web Search API route, not Zhipu Chat Completions `tools=[web_search]`, not Search Agent, and not the MCP Server.
+- `zhipu-search` support is the Web Search API route, not Zhipu Chat Completions `tools=[web_search]`, not Search Agent, and not the MCP Server.
+- Zhipu Coding Plan support is a separate Remote MCP route. `web_search_prime` maps to `web_search`, `webReader` maps to `web_fetch`, and zread tools map to explicit repo/docs discovery commands. It is not mixed into the existing `/paas/v4/web_search` Zhipu REST provider.
+- Zhipu Coding Plan MCP requires its own Coding Plan entitlement. A normal `ZHIPU_API_KEY` for Web Search API does not prove `zhipu-mcp-search` or zread access. If `ZHIPU_MCP_API_KEY` is absent or unauthorized, Smart Search skips those MCP providers; the `standard` minimum profile and same-capability fallback still work through the configured REST/search/fetch providers.
+- Jina Reader is not a general search provider. `JINA_API_KEY` is required for Jina to count toward `standard`; `JINA_RESPOND_WITH=readerlm-v2` also requires `JINA_API_KEY`.
 - `ZHIPU_SEARCH_ENGINE` defaults to `search_std`. Supported official values include `search_std`, `search_pro`, `search_pro_sogou`, and `search_pro_quark`; custom values remain allowed for future services.
 - `TAVILY_API_URL` affects Tavily only. It does not proxy Zhipu. For Tavily Hikari / pooled endpoints, use `https://<host>/api/tavily`; setup normalizes root-host or `/mcp` inputs to that REST base.
 - `FIRECRAWL_API_URL` defaults to `https://api.firecrawl.dev/v2`.
 - AnySearch uses JSON-RPC 2.0 `tools/call` at `https://api.anysearch.com/mcp` by default. It allows anonymous calls when no key is configured, but authenticated calls send `Authorization: Bearer ...`. HTTP 200 responses with `result.isError=true` are treated as provider errors, not as successful evidence.
+- `doctor` and `route` report intent router status, embedding model, threshold, margin, their config source, timeout, and degradation behavior. They do not expose router API keys.
 
 Non-interactive setup example:
 
@@ -225,11 +313,19 @@ smart-search setup --non-interactive `
   --validation-level "balanced" `
   --fallback-mode "auto" `
   --minimum-profile "standard" `
+  --intent-router "hybrid" `
+  --intent-embedding-api-url "https://api.siliconflow.cn/v1/embeddings" `
+  --intent-embedding-api-key "your-siliconflow-key" `
+  --intent-embedding-model "Qwen/Qwen3-Embedding-8B" `
+  --intent-embedding-threshold "0.475" `
+  --intent-embedding-margin "0.053" `
   --exa-key "your-exa-key" `
   --context7-key "your-context7-key" `
   --zhipu-key "your-zhipu-key" `
   --zhipu-api-url "https://open.bigmodel.cn/api" `
   --zhipu-search-engine "search_pro_sogou" `
+  --zhipu-mcp-key "your-zhipu-coding-plan-key" `
+  --jina-key "your-jina-key" `
   --tavily-api-url "https://api.tavily.com" `
   --tavily-key "your-tavily-key" `
   --firecrawl-api-url "https://api.firecrawl.dev/v2" `
@@ -240,7 +336,7 @@ Minimum profile defaults to `standard`, requiring at least:
 
 - one `main_search` provider: xAI Responses or OpenAI-compatible;
 - one `docs_search` provider: Exa or Context7;
-- one `web_fetch` provider: Tavily or Firecrawl.
+- one `web_fetch` provider: Tavily, Jina with `JINA_API_KEY`, Zhipu Coding Plan MCP Reader, or Firecrawl.
 
 Missing required capabilities fail closed with a configuration error. Use `SMART_SEARCH_MINIMUM_PROFILE=off` only for local experiments.
 
@@ -261,6 +357,7 @@ Local config path:
 - Windows default: `%LOCALAPPDATA%\smart-search\config.json`.
 - Linux/macOS default: `~/.config/smart-search/config.json`.
 - `SMART_SEARCH_CONFIG_DIR` is an advanced override for CI, containers, sandboxes, or portable installs.
+- `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS` are advanced `research` routing overrides. They accept provider CSV values and can only reorder or disable providers inside existing capability boundaries.
 - Earlier Windows source builds defaulted to `~\.config\smart-search\config.json`, while some installs were already pinned to `%LOCALAPPDATA%\smart-search` through `SMART_SEARCH_CONFIG_DIR`. If the new Windows default file is missing but the old home config exists, Smart Search reads the old file as `legacy_windows_home` so upgrades do not lose configuration. `doctor` reports the active path, default path, old home path, `SMART_SEARCH_CONFIG_DIR`, and whether that override merely matches the current default.
 
 Provider timeouts:
@@ -274,18 +371,26 @@ Provider timeouts:
 | Command | Alias | Purpose |
 | --- | --- | --- |
 | `search` | `s` | Fast live search and broad synthesis |
+| `route` | `rt` | Explain required capabilities without running providers |
 | `deep` | `dr` | Offline Deep Research plan |
+| `research` | `rs` | Live Deep Research execution |
 | `fetch` | `f` | Fetch one URL as JSON, Markdown, or content |
 | `map` | `m` | Map a website structure |
 | `exa-search` | `exa`, `x` | Exa source discovery |
 | `exa-similar` | `xs` | Similar pages from one URL |
 | `zhipu-search` | `z`, `zp` | Zhipu Web Search API |
+| `zhipu-mcp-search` | `zmcp-search` | Zhipu Coding Plan MCP `web_search_prime` |
+| `zhipu-mcp-reader` | `zmcp-reader` | Zhipu Coding Plan MCP `webReader` |
+| `zhipu-mcp-search-doc` | `zmcp-doc` | Search open-source repository docs through zread MCP |
+| `zhipu-mcp-repo-structure` | `zmcp-tree` | Read repository structure through zread MCP |
+| `zhipu-mcp-read-file` | `zmcp-file` | Read one repository file through zread MCP |
 | `anysearch-domains` | `as-domains` | Experimental AnySearch domain discovery |
 | `anysearch-search` | `as-search`, `as` | Experimental AnySearch vertical/general search |
 | `anysearch-extract` | `as-extract` | Experimental AnySearch URL extraction |
 | `anysearch-batch` | `as-batch` | Experimental AnySearch batch search, up to 5 queries |
 | `context7-library` | `c7`, `ctx7` | Resolve Context7 library candidates |
 | `context7-docs` | `c7d`, `c7docs`, `ctx7-docs` | Fetch Context7 docs |
+| `route-calibrate` | `route-cal`, `rcal` | Evaluate embedding router models and recommend threshold/margin |
 | `doctor` | `d` | Masked config and connectivity check |
 | `diagnose` | `diag` | Focused OpenAI-compatible troubleshooting report |
 | `setup` | `init` | Interactive or scripted setup |
@@ -298,6 +403,9 @@ Useful examples:
 
 ```powershell
 smart-search search "query" --validation balanced --extra-sources 3 --timeout 90 --format json --output result.json
+smart-search route "React useEffect API docs" --format markdown
+smart-search route-calibrate --models "Qwen/Qwen3-Embedding-8B" --format markdown
+smart-search research "query" --budget deep --fallback auto --format json --output research.json
 smart-search search "query" --stream --format json
 smart-search search "query" --no-stream --format json
 smart-search search "nba report" --format content
@@ -305,6 +413,9 @@ smart-search exa-search "OpenAI Responses API documentation" --include-domains p
 smart-search context7-library "react" "hooks" --format json
 smart-search context7-docs "/facebook/react" "useEffect cleanup" --format json
 smart-search zhipu-search "today China AI news" --search-engine search_pro_sogou --count 5 --format json
+smart-search zhipu-mcp-search "today China AI news" --count 5 --format json
+smart-search zhipu-mcp-reader "https://example.com/source" --format json
+smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
 smart-search anysearch-search "CVE-2024-3094" --domain security.cve --max-results 3 --format json
 smart-search anysearch-extract "https://example.com/source" --format json
 smart-search exa-similar "https://example.com/source" --num-results 5 --format json
