@@ -184,7 +184,10 @@ Added direct content output, balanced realtime sports web reinforcement, package
 
 ### Main Changes
 
-(Add details)
+- Implemented Jina Reader as controlled `web_fetch` only: key-required for the standard minimum profile, ReaderLM-v2 fail-closed without key, challenge/empty/error filtering, and same-capability fallback.
+- Implemented separate Zhipu Coding Plan Remote MCP provider paths for `webSearchPrime`, `webReader`, and zread repo/docs discovery tools without mixing them into the existing Zhipu REST Web Search provider.
+- Updated setup/config, doctor/status, public and packaged skill docs, README files, provider-capability spec, and unit/regression tests.
+- Captured the async wrapper gotcha where provider JSON decoders must be awaited before returning from service-level wrappers.
 
 ### Git Commits
 
@@ -195,7 +198,13 @@ Added direct content output, balanced realtime sports web reinforcement, package
 
 ### Testing
 
-- [OK] (Add test results)
+- [OK] `.venv\Scripts\python.exe -m pytest tests -q` -> 257 passed.
+- [OK] `.venv\Scripts\python.exe -m smart_search.cli regression` -> 195 passed.
+- [OK] `.venv\Scripts\python.exe -m smart_search.cli smoke --mock --format json` -> `ok: true`.
+- [OK] `python -m compileall -q src tests`.
+- [OK] `git diff --check` with line-ending warnings only.
+- [OK] `npm pack --dry-run` included Jina/Zhipu MCP provider files and bundled skill assets.
+- [OK] Secret scan found no real Jina key in the repository.
 
 ### Status
 
@@ -607,6 +616,157 @@ Added a beginner-facing diagnose openai-compatible command, enhanced search time
 ### Testing
 
 - [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 17: Jina and Zhipu MCP provider beta
+
+**Date**: 2026-06-06
+**Task**: Jina and Zhipu MCP provider beta
+**Branch**: `codex/update-anysearch-readme-links`
+
+### Summary
+
+Added controlled Jina web_fetch support and separate Zhipu Coding Plan Remote MCP providers; updated setup/config/docs/skills/spec/tests; source validation passed with pytest, regression, mock smoke, compileall, diff check, secret scan, and npm dry-run.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b19d00c` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 18: Research router and fallback
+
+**Date**: 2026-06-06
+**Task**: Research router and fallback
+**Branch**: `codex/update-anysearch-readme-links`
+
+### Summary
+
+Added the live research executor with capability-first provider-advantage routing, same-capability fallback, safe research provider overrides, evidence-only synthesis, synchronized docs/skills/provider contract, and completed full unit, regression, mock smoke, live doctor, live research, and live smoke verification.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `6798283` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 19: Research router Jina and Zhipu MCP beta closeout
+
+**Date**: 2026-06-06
+**Task**: Research router Jina and Zhipu MCP beta closeout
+**Branch**: `codex/update-anysearch-readme-links`
+
+### Summary
+
+Closed out the beta provider work: Jina fetch-only support, Zhipu Coding Plan MCP schema/error handling, live research router and same-capability fallback, provider-boundary documentation, Jina capability probe script, and release notes for 0.1.14-beta.2.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b19d00c` | (see git log) |
+| `539cb0e` | (see git log) |
+| `6798283` | (see git log) |
+| `205c7a6` | (see git log) |
+| `d01814c` | (see git log) |
+| `c775043` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
+
+
+## Session 20: Embedding router calibration preset release
+
+**Date**: 2026-06-07
+**Task**: Embedding router calibration preset release
+**Branch**: `main`
+
+### Summary
+
+Added route-calibrate and model-aware embedding threshold/margin routing, standardized Qwen3-Embedding-8B setup preset, published 0.1.14-beta.5, synced local CLI and managed skills, and verified installed runtime.
+
+### Main Changes
+
+- Implemented `route-calibrate` and model-aware semantic threshold/margin routing.
+- Added the Qwen3-Embedding-8B setup preset: SiliconFlow endpoint, model, threshold `0.475`, margin `0.053`.
+- Updated `setup`, `doctor`, and `route` so 8B users get preset values or clear configuration recommendations without leaking keys.
+- Synced README, Chinese README, public skill, packaged skill, and backend provider capability spec.
+- Published npm `next=0.1.14-beta.5` from commit `f283c76`, then installed and pinned it locally through mise.
+- Updated all managed local `smart-search-cli` skill targets and verified the installed hashes were up to date.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f283c76` | (see git log) |
+
+### Testing
+
+- [OK] `.venv\Scripts\python.exe -m pytest tests -q` -> 299 passed
+- [OK] `.venv\Scripts\python.exe -m smart_search.cli regression` -> 237 passed
+- [OK] `.venv\Scripts\python.exe -m smart_search.cli smoke --mock --format json`
+- [OK] `.venv\Scripts\python.exe -m compileall -q src tests`
+- [OK] `git diff --check`
+- [OK] GitHub Actions publish run `27068473025` published `@konbakuyomu/smart-search@0.1.14-beta.5` with npm dist-tag `next`
+- [OK] Installed runtime: `smart-search --version` -> `smart-search 0.1.14b5`
+- [OK] `smart-search skills update --all --format json` installed 15 targets; `skills status --all` showed all up to date
+- [OK] Installed runtime `smart-search regression` and `smart-search smoke --mock --format json`
+- [OK] Local 8B config set: `INTENT_EMBEDDING_THRESHOLD=0.475`, `INTENT_EMBEDDING_MARGIN=0.053`; `doctor` and `route` reported `config_file` sources and no preset recommendation warning
 
 ### Status
 

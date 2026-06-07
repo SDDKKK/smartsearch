@@ -49,11 +49,17 @@ def test_version_flags_exit_successfully(monkeypatch, capsys):
 def test_each_subcommand_help_exits_successfully(capsys):
     commands = [
         ["search", "--help"],
+        ["route", "--help"],
         ["fetch", "--help"],
         ["map", "--help"],
         ["exa-search", "--help"],
         ["exa-similar", "--help"],
         ["zhipu-search", "--help"],
+        ["zhipu-mcp-search", "--help"],
+        ["zhipu-mcp-reader", "--help"],
+        ["zhipu-mcp-search-doc", "--help"],
+        ["zhipu-mcp-repo-structure", "--help"],
+        ["zhipu-mcp-read-file", "--help"],
         ["anysearch-domains", "--help"],
         ["anysearch-search", "--help"],
         ["anysearch-extract", "--help"],
@@ -61,6 +67,7 @@ def test_each_subcommand_help_exits_successfully(capsys):
         ["context7-library", "--help"],
         ["context7-docs", "--help"],
         ["deep", "--help"],
+        ["route-calibrate", "--help"],
         ["smoke", "--help"],
         ["doctor", "--help"],
         ["diagnose", "--help"],
@@ -96,6 +103,7 @@ def test_command_aliases_parse_to_canonical_commands():
 
     command_cases = [
         (["s", "query"], "search"),
+        (["rt", "query"], "route"),
         (["f", "https://example.com"], "fetch"),
         (["m", "https://example.com"], "map"),
         (["exa", "query"], "exa-search"),
@@ -103,6 +111,11 @@ def test_command_aliases_parse_to_canonical_commands():
         (["xs", "https://example.com"], "exa-similar"),
         (["z", "query"], "zhipu-search"),
         (["zp", "query"], "zhipu-search"),
+        (["zmcp-search", "query"], "zhipu-mcp-search"),
+        (["zmcp-reader", "https://example.com"], "zhipu-mcp-reader"),
+        (["zmcp-doc", "owner/repo", "install"], "zhipu-mcp-search-doc"),
+        (["zmcp-tree", "owner/repo"], "zhipu-mcp-repo-structure"),
+        (["zmcp-file", "owner/repo", "README.md"], "zhipu-mcp-read-file"),
         (["as-domains"], "anysearch-domains"),
         (["as-search", "query"], "anysearch-search"),
         (["as", "query"], "anysearch-search"),
@@ -114,6 +127,8 @@ def test_command_aliases_parse_to_canonical_commands():
         (["c7docs", "/facebook/react", "hooks"], "context7-docs"),
         (["ctx7-docs", "/facebook/react", "hooks"], "context7-docs"),
         (["dr", "query"], "deep"),
+        (["route-cal"], "route-calibrate"),
+        (["rcal"], "route-calibrate"),
         (["sm"], "smoke"),
         (["d"], "doctor"),
         (["diag", "openai-compatible"], "diagnose"),
@@ -357,7 +372,7 @@ def test_doctor_markdown_outputs_human_health_report(monkeypatch, capsys):
             "capability_status": {
                 "main_search": {"ok": True, "configured": ["openai-compatible"], "fallback_chain": ["xai-responses", "openai-compatible"]},
                 "docs_search": {"ok": True, "configured": ["context7"], "fallback_chain": ["context7", "exa"]},
-                "web_fetch": {"ok": True, "configured": ["tavily"], "fallback_chain": ["tavily", "firecrawl"]},
+                "web_fetch": {"ok": True, "configured": ["tavily", "jina"], "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"]},
             },
             "main_search_connection_tests": {
                 "openai-compatible": {
@@ -371,9 +386,34 @@ def test_doctor_markdown_outputs_human_health_report(monkeypatch, capsys):
             },
             "exa_connection_test": {"status": "ok", "message": "Exa ok", "response_time_ms": 11.1},
             "tavily_connection_test": {"status": "ok", "message": "Tavily ok", "response_time_ms": 22.2},
+            "jina_connection_test": {"status": "ok", "message": "Jina ok", "response_time_ms": 10.0},
             "firecrawl_connection_test": {"status": "configured", "message": "key configured"},
             "zhipu_connection_test": {"status": "warning", "message": "HTTP 429"},
+            "zhipu_mcp_connection_test": {"status": "not_configured", "message": "missing"},
             "context7_connection_test": {"status": "not_configured", "message": "missing"},
+            "intent_router_status": {
+                "mode": "hybrid",
+                "ok": True,
+                "embeddings_configured": False,
+                "classifier_configured": True,
+                "embedding_model": "Qwen/Qwen3-Embedding-8B",
+                "embedding_threshold": 0.74,
+                "embedding_margin": 0.05,
+                "embedding_threshold_source": "default",
+                "embedding_margin_source": "default",
+                "embedding_preset_id": "qwen3-embedding-8b",
+                "embedding_preset_threshold": "0.475",
+                "embedding_preset_margin": "0.053",
+                "embedding_preset_recommended": True,
+                "embedding_preset_recommendation": "Qwen/Qwen3-Embedding-8B works best with calibrated threshold and margin.",
+                "embedding_preset_commands": [
+                    "smart-search config set INTENT_EMBEDDING_THRESHOLD 0.475",
+                    "smart-search config set INTENT_EMBEDDING_MARGIN 0.053",
+                ],
+                "classifier_model": "intent-mini",
+                "timeout_seconds": 8.0,
+                "degrades_to_rules": True,
+            },
         }
 
     monkeypatch.setattr(cli.service, "doctor", fake_doctor)
@@ -404,6 +444,12 @@ def test_doctor_markdown_outputs_human_health_report(monkeypatch, capsys):
     assert long_message in out
     assert "relay-model" in out
     assert "Tavily ok" in out
+    assert "## Intent Router" in out
+    assert "| classifier_configured | YES |" in out
+    assert "| embedding_preset | qwen3-embedding-8b |" in out
+    assert "Embedding Preset Recommendation" in out
+    assert "smart-search config set INTENT_EMBEDDING_THRESHOLD 0.475" in out
+    assert "intent-mini" in out
 
 
 def test_doctor_content_outputs_non_empty_summary(monkeypatch, capsys):
@@ -414,6 +460,11 @@ def test_doctor_content_outputs_non_empty_summary(monkeypatch, capsys):
             "minimum_profile_ok": False,
             "capability_status": {
                 "main_search": {"ok": False, "configured": [], "fallback_chain": ["xai-responses", "openai-compatible"]}
+            },
+            "intent_router_status": {
+                "embedding_preset_recommendation": "Qwen/Qwen3-Embedding-8B works best with calibrated threshold and margin.",
+                "embedding_preset_threshold": "0.475",
+                "embedding_preset_margin": "0.053",
             },
             "error": "Missing required capability: main_search",
             "error_type": "config_error",
@@ -428,6 +479,7 @@ def test_doctor_content_outputs_non_empty_summary(monkeypatch, capsys):
     assert out.strip()
     assert "Doctor FAIL" in out
     assert "Minimum profile: FAIL" in out
+    assert "Embedding preset recommendation: threshold=0.475 margin=0.053" in out
     assert "Missing required capability" in out
 
 
@@ -544,6 +596,77 @@ def test_deep_alias_and_markdown_output(monkeypatch, capsys):
     assert "# Deep Research Plan" in out
     assert "React useEffect 最新文档" in out
     assert "smart-search fetch" in out
+
+
+def test_research_command_uses_service_and_outputs_json(monkeypatch, capsys, tmp_path):
+    captured = {}
+
+    async def fake_research(query, budget="deep", evidence_dir="", fallback="auto"):
+        captured.update({"query": query, "budget": budget, "evidence_dir": evidence_dir, "fallback": fallback})
+        return {
+            "ok": True,
+            "mode": "deep_research_execution",
+            "query_mode": "research",
+            "question": query,
+            "final_answer": "Evidence answer",
+            "content": "Evidence answer",
+            "citations": [{"url": "https://example.com", "title": "Example", "provider": "jina"}],
+            "evidence_items": [{"url": "https://example.com", "provider": "jina", "content": "Evidence"}],
+            "gap_check": {"status": "closed", "gaps": []},
+            "provider_attempts": [],
+            "fallback_used": False,
+            "degraded": False,
+            "route_policy_version": "research-router-v1",
+            "evidence_dir": evidence_dir,
+        }
+
+    monkeypatch.setattr(cli.service, "research", fake_research)
+
+    code = cli.main([
+        "research",
+        "React docs",
+        "--budget",
+        "standard",
+        "--evidence-dir",
+        str(tmp_path),
+        "--fallback",
+        "off",
+        "--format",
+        "json",
+    ])
+
+    assert code == cli.EXIT_OK
+    data = json.loads(capsys.readouterr().out)
+    assert captured == {"query": "React docs", "budget": "standard", "evidence_dir": str(tmp_path), "fallback": "off"}
+    assert data["query_mode"] == "research"
+    assert data["final_answer"] == "Evidence answer"
+
+
+def test_research_markdown_and_content_output(monkeypatch, capsys):
+    async def fake_research(query, budget="deep", evidence_dir="", fallback="auto"):
+        return {
+            "ok": True,
+            "question": query,
+            "final_answer": "Evidence answer",
+            "content": "Evidence answer",
+            "citations": [{"url": "https://example.com", "title": "Example", "provider": "jina"}],
+            "gap_check": {"gaps": []},
+            "fallback_used": True,
+            "degraded": False,
+            "route_policy_version": "research-router-v1",
+            "evidence_dir": "C:/tmp/evidence",
+        }
+
+    monkeypatch.setattr(cli.service, "research", fake_research)
+
+    assert cli.main(["rs", "React docs", "--format", "markdown"]) == cli.EXIT_OK
+    markdown = capsys.readouterr().out
+    assert "# Research Report" in markdown
+    assert "Evidence answer" in markdown
+    assert "https://example.com" in markdown
+
+    assert cli.main(["research", "React docs", "--format", "content"]) == cli.EXIT_OK
+    assert capsys.readouterr().out == "Evidence answer\n"
 
 
 def test_exa_search_passes_powershell_split_domains(monkeypatch, capsys):
@@ -990,6 +1113,12 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
     async def fake_zhipu_search(*args, **kwargs):
         return {"ok": True, "query": "news", "provider": "zhipu", "results": [{"title": "News", "url": "https://news.example.com", "description": "desc"}]}
 
+    async def fake_zhipu_mcp_search(*args, **kwargs):
+        return {"ok": True, "query": "news", "provider": "zhipu-mcp", "tool": "web_search_prime", "results": [{"title": "MCP News", "url": "https://mcp.example.com"}]}
+
+    async def fake_zhipu_mcp_reader(*args, **kwargs):
+        return {"ok": True, "url": "https://source.example.com", "provider": "zhipu-mcp-reader", "tool": "webReader", "content": "# MCP Page"}
+
     async def fake_context7_library(*args, **kwargs):
         return {"ok": True, "query": "react", "provider": "context7", "results": [{"id": "/facebook/react", "title": "React", "description": "docs"}]}
 
@@ -999,6 +1128,8 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
     monkeypatch.setattr(cli.service, "exa_search", fake_exa_search)
     monkeypatch.setattr(cli.service, "exa_find_similar", fake_exa_similar)
     monkeypatch.setattr(cli.service, "zhipu_search", fake_zhipu_search)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_search", fake_zhipu_mcp_search)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_reader", fake_zhipu_mcp_reader)
     monkeypatch.setattr(cli.service, "context7_library", fake_context7_library)
     monkeypatch.setattr(cli.service, "map_site", fake_map_site)
 
@@ -1006,6 +1137,8 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
         (["exa-search", "query", "--format", "markdown"], "Example", "https://example.com"),
         (["exa-similar", "https://source.example.com", "--format", "markdown"], "Similar", "https://similar.example.com"),
         (["zhipu-search", "news", "--format", "markdown"], "News", "https://news.example.com"),
+        (["zhipu-mcp-search", "news", "--format", "markdown"], "MCP News", "https://mcp.example.com"),
+        (["zhipu-mcp-reader", "https://source.example.com", "--format", "markdown"], "MCP Page", "Zhipu Coding Plan MCP Reader"),
         (["context7-library", "react", "--format", "markdown"], "React", "/facebook/react"),
         (["map", "https://docs.example.com", "--format", "markdown"], "https://docs.example.com/api", "Site Map"),
     ]
@@ -1060,6 +1193,12 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
     async def fake_zhipu(*args, **kwargs):
         return {"ok": True, "results": [{"title": "News", "url": "https://news.example.com"}]}
 
+    async def fake_zhipu_mcp(*args, **kwargs):
+        return {"ok": True, "provider": "zhipu-mcp", "tool": "web_search_prime", "results": [{"title": "MCP", "url": "https://mcp.example.com"}]}
+
+    async def fake_zhipu_mcp_reader(*args, **kwargs):
+        return {"ok": True, "provider": "zhipu-mcp-reader", "tool": "webReader", "content": "MCP Page"}
+
     async def fake_c7_library(*args, **kwargs):
         return {"ok": True, "results": [{"id": "/lib", "title": "Library"}]}
 
@@ -1071,6 +1210,12 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
 
     async def fake_smoke(mode="mock"):
         return {"ok": True, "mode": mode, "failed_cases": [], "cases": [{"name": "case", "ok": True}]}
+
+    async def fake_research(query, budget="deep", evidence_dir="", fallback="auto"):
+        return {"ok": True, "question": query, "content": "Research", "final_answer": "Research", "citations": [], "gap_check": {"gaps": []}}
+
+    async def fake_route_calibrate(models=""):
+        return {"ok": True, "primary_metric": "semantic_macro_f1", "dataset_size": 100, "model_results": [], "recommended_model": ""}
 
     def fake_plan(*args, **kwargs):
         return {"ok": True, "mode": "deep_research", "question": "q", "difficulty": "standard", "evidence_policy": "fetch_before_claim"}
@@ -1099,10 +1244,17 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
     monkeypatch.setattr(cli.service, "exa_search", fake_exa)
     monkeypatch.setattr(cli.service, "exa_find_similar", fake_exa)
     monkeypatch.setattr(cli.service, "zhipu_search", fake_zhipu)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_search", fake_zhipu_mcp)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_reader", fake_zhipu_mcp_reader)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_search_doc", fake_zhipu_mcp)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_repo_structure", fake_zhipu_mcp)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_read_file", fake_zhipu_mcp)
     monkeypatch.setattr(cli.service, "context7_library", fake_c7_library)
     monkeypatch.setattr(cli.service, "context7_docs", fake_c7_docs)
     monkeypatch.setattr(cli.service, "doctor", fake_doctor)
     monkeypatch.setattr(cli.service, "smoke", fake_smoke)
+    monkeypatch.setattr(cli.service, "research", fake_research)
+    monkeypatch.setattr(cli.service, "route_calibrate", fake_route_calibrate)
     monkeypatch.setattr(cli.service, "build_deep_research_plan", fake_plan)
     monkeypatch.setattr(cli.service, "config_path", fake_config_path)
     monkeypatch.setattr(cli.service, "config_list", fake_config_list)
@@ -1118,9 +1270,16 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
         ("exa-search", ["exa-search", "query", "--format", "markdown"]),
         ("exa-similar", ["exa-similar", "https://example.com", "--format", "markdown"]),
         ("zhipu-search", ["zhipu-search", "query", "--format", "markdown"]),
+        ("zhipu-mcp-search", ["zhipu-mcp-search", "query", "--format", "markdown"]),
+        ("zhipu-mcp-reader", ["zhipu-mcp-reader", "https://example.com", "--format", "markdown"]),
+        ("zhipu-mcp-search-doc", ["zhipu-mcp-search-doc", "owner/repo", "install", "--format", "markdown"]),
+        ("zhipu-mcp-repo-structure", ["zhipu-mcp-repo-structure", "owner/repo", "--format", "markdown"]),
+        ("zhipu-mcp-read-file", ["zhipu-mcp-read-file", "owner/repo", "README.md", "--format", "markdown"]),
         ("context7-library", ["context7-library", "react", "--format", "markdown"]),
         ("context7-docs", ["context7-docs", "/lib", "hooks", "--format", "markdown"]),
         ("deep", ["deep", "query", "--format", "markdown"]),
+        ("route-calibrate", ["route-calibrate", "--format", "markdown"]),
+        ("research", ["research", "query", "--format", "markdown"]),
         ("smoke", ["smoke", "--format", "markdown"]),
         ("doctor", ["doctor", "--format", "markdown"]),
         ("diagnose", ["diagnose", "openai-compatible", "--format", "markdown"]),
@@ -1142,9 +1301,16 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
             "exa-search": {"ok": True, "results": [{"title": "Example", "url": "https://example.com"}]},
             "exa-similar": {"ok": True, "results": [{"title": "Example", "url": "https://example.com"}]},
             "zhipu-search": {"ok": True, "results": [{"title": "News", "url": "https://news.example.com"}]},
+            "zhipu-mcp-search": {"ok": True, "provider": "zhipu-mcp", "tool": "web_search_prime", "results": [{"title": "MCP", "url": "https://mcp.example.com"}]},
+            "zhipu-mcp-reader": {"ok": True, "provider": "zhipu-mcp-reader", "tool": "webReader", "content": "MCP Page"},
+            "zhipu-mcp-search-doc": {"ok": True, "provider": "zhipu-mcp-zread", "tool": "search_doc", "results": [{"title": "Doc", "url": "https://docs.example.com"}]},
+            "zhipu-mcp-repo-structure": {"ok": True, "provider": "zhipu-mcp-zread", "tool": "get_repo_structure", "content": "tree"},
+            "zhipu-mcp-read-file": {"ok": True, "provider": "zhipu-mcp-zread", "tool": "read_file", "content": "file"},
             "context7-library": {"ok": True, "results": [{"id": "/lib", "title": "Library"}]},
             "context7-docs": {"ok": True, "library_id": "/lib", "query": "hooks", "content": "Docs"},
             "deep": {"ok": True, "mode": "deep_research", "question": "q", "difficulty": "standard", "evidence_policy": "fetch_before_claim"},
+            "route-calibrate": {"ok": True, "primary_metric": "semantic_macro_f1", "dataset_size": 100, "model_results": [], "recommended_model": ""},
+            "research": {"ok": True, "question": "q", "content": "Research", "final_answer": "Research", "citations": [], "gap_check": {"gaps": []}},
             "smoke": {"ok": True, "mode": "mock", "failed_cases": [], "cases": [{"name": "case", "ok": True}]},
             "doctor": {"ok": True, "config_status": "ok", "minimum_profile_ok": True},
             "diagnose": {"ok": True, "provider": "openai-compatible", "summary": "ok", "recommendation": "none"},
@@ -1167,6 +1333,7 @@ def test_non_content_commands_have_non_empty_content_fallback():
         "skills": {"ok": True, "targets": [{"target": "codex", "status": "up_to_date"}], "status_counts": {"up_to_date": 1}},
         "exa-search": {"ok": True, "results": [{"title": "Example", "url": "https://example.com"}]},
         "anysearch-search": {"ok": True, "provider": "anysearch", "results": [{"title": "AnySearch", "url": ""}]},
+        "route-calibrate": {"ok": True, "primary_metric": "semantic_macro_f1", "dataset_size": 100, "model_results": [], "recommended_model": ""},
     }
     for command, data in cases.items():
         rendered = cli._render(command, data, "content")
@@ -1250,12 +1417,46 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "auto",
         "--minimum-profile",
         "standard",
+        "--intent-router",
+        "hybrid",
+        "--intent-embedding-api-url",
+        "api.example.com/v1/embeddings",
+        "--intent-embedding-api-key",
+        "embed-test-secret",
+        "--intent-embedding-model",
+        "embed-model",
+        "--intent-classifier-api-url",
+        "classifier.example.com/v1/chat/completions",
+        "--intent-classifier-api-key",
+        "classifier-test-secret",
+        "--intent-classifier-model",
+        "intent-mini",
+        "--intent-router-timeout",
+        "4.5",
         "--zhipu-key",
         "zhipu-secret",
         "--zhipu-api-url",
         "zhipu.example.com/api",
         "--zhipu-search-engine",
         "search_pro",
+        "--zhipu-mcp-key",
+        "zmcp-secret",
+        "--zhipu-mcp-search-api-url",
+        "https://zmcp.example.com/search",
+        "--zhipu-mcp-reader-api-url",
+        "https://zmcp.example.com/reader",
+        "--zhipu-mcp-zread-api-url",
+        "https://zmcp.example.com/zread",
+        "--zhipu-mcp-timeout",
+        "8",
+        "--jina-key",
+        "jina-secret",
+        "--jina-reader-api-url",
+        "r.jina.ai",
+        "--jina-respond-with",
+        "readerlm-v2",
+        "--jina-timeout",
+        "10",
         "--context7-key",
         "ctx-secret",
         "--tavily-api-url",
@@ -1286,9 +1487,26 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["SMART_SEARCH_VALIDATION_LEVEL"] == "balanced"
     assert saved["SMART_SEARCH_FALLBACK_MODE"] == "auto"
     assert saved["SMART_SEARCH_MINIMUM_PROFILE"] == "standard"
+    assert saved["SMART_SEARCH_INTENT_ROUTER"] == "hybrid"
+    assert saved["INTENT_EMBEDDING_API_URL"] == "https://api.example.com/v1/embeddings"
+    assert saved["INTENT_EMBEDDING_API_KEY"] == "embed-test-secret"
+    assert saved["INTENT_EMBEDDING_MODEL"] == "embed-model"
+    assert saved["INTENT_CLASSIFIER_API_URL"] == "https://classifier.example.com/v1/chat/completions"
+    assert saved["INTENT_CLASSIFIER_API_KEY"] == "classifier-test-secret"
+    assert saved["INTENT_CLASSIFIER_MODEL"] == "intent-mini"
+    assert saved["INTENT_ROUTER_TIMEOUT_SECONDS"] == "4.5"
     assert saved["ZHIPU_API_KEY"] == "zhipu-secret"
     assert saved["ZHIPU_API_URL"] == "https://zhipu.example.com/api"
     assert saved["ZHIPU_SEARCH_ENGINE"] == "search_pro"
+    assert saved["ZHIPU_MCP_API_KEY"] == "zmcp-secret"
+    assert saved["ZHIPU_MCP_SEARCH_API_URL"] == "https://zmcp.example.com/search"
+    assert saved["ZHIPU_MCP_READER_API_URL"] == "https://zmcp.example.com/reader"
+    assert saved["ZHIPU_MCP_ZREAD_API_URL"] == "https://zmcp.example.com/zread"
+    assert saved["ZHIPU_MCP_TIMEOUT_SECONDS"] == "8"
+    assert saved["JINA_API_KEY"] == "jina-secret"
+    assert saved["JINA_READER_API_URL"] == "https://r.jina.ai"
+    assert saved["JINA_RESPOND_WITH"] == "readerlm-v2"
+    assert saved["JINA_TIMEOUT_SECONDS"] == "10"
     assert saved["CONTEXT7_API_KEY"] == "ctx-secret"
     assert saved["TAVILY_API_URL"] == "https://pool.example.com/api/tavily"
     assert saved["TAVILY_API_KEY"] == "th-test-secret"
@@ -1299,7 +1517,183 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["ANYSEARCH_TIMEOUT_SECONDS"] == "9"
     assert "xai-test-secret" not in out
     assert "th-test-secret" not in out
+    assert "jina-secret" not in out
+    assert "zmcp-secret" not in out
     assert "as-test-secret" not in out
+    assert "embed-test-secret" not in out
+    assert "classifier-test-secret" not in out
+
+
+def test_setup_non_interactive_autofills_qwen3_8b_embedding_preset(monkeypatch, tmp_path, capsys):
+    saved = {}
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service.config, "_config_file", tmp_path / "config.json")
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": {}})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--intent-router",
+        "hybrid",
+        "--intent-embedding-api-key",
+        "embed-test-secret",
+        "--intent-embedding-model",
+        "Qwen/Qwen3-Embedding-8B",
+    ])
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == cli.EXIT_OK
+    assert saved["INTENT_EMBEDDING_API_URL"] == "https://api.siliconflow.cn/v1/embeddings"
+    assert saved["INTENT_EMBEDDING_MODEL"] == "Qwen/Qwen3-Embedding-8B"
+    assert saved["INTENT_EMBEDDING_THRESHOLD"] == "0.475"
+    assert saved["INTENT_EMBEDDING_MARGIN"] == "0.053"
+    assert "warnings" not in data
+    assert "embed-test-secret" not in json.dumps(data)
+
+
+def test_setup_non_interactive_keeps_explicit_embedding_thresholds(monkeypatch, tmp_path, capsys):
+    saved = {}
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service.config, "_config_file", tmp_path / "config.json")
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": {}})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--intent-embedding-model",
+        "Qwen/Qwen3-Embedding-8B",
+        "--intent-embedding-threshold",
+        "0.42",
+        "--intent-embedding-margin",
+        "0.07",
+    ])
+
+    assert code == cli.EXIT_OK
+    assert saved["INTENT_EMBEDDING_THRESHOLD"] == "0.42"
+    assert saved["INTENT_EMBEDDING_MARGIN"] == "0.07"
+    assert saved["INTENT_EMBEDDING_API_URL"] == "https://api.siliconflow.cn/v1/embeddings"
+
+
+def test_setup_non_interactive_does_not_apply_qwen3_8b_preset_to_other_models(monkeypatch, tmp_path, capsys):
+    saved = {}
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service.config, "_config_file", tmp_path / "config.json")
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": {}})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--intent-embedding-model",
+        "custom-embedding-model",
+    ])
+
+    assert code == cli.EXIT_OK
+    assert saved == {"INTENT_EMBEDDING_MODEL": "custom-embedding-model"}
+
+
+def test_setup_non_interactive_does_not_apply_qwen3_8b_preset_without_model(monkeypatch, tmp_path, capsys):
+    saved = {}
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service.config, "_config_file", tmp_path / "config.json")
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": {}})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--intent-embedding-api-key",
+        "embed-test-secret",
+    ])
+
+    assert code == cli.EXIT_OK
+    assert saved == {"INTENT_EMBEDDING_API_KEY": "embed-test-secret"}
+
+
+def test_setup_non_interactive_warns_when_qwen3_8b_existing_thresholds_mismatch(monkeypatch, tmp_path, capsys):
+    saved = {}
+    current = {
+        "INTENT_EMBEDDING_API_URL": "https://api.siliconflow.cn/v1/embeddings",
+        "INTENT_EMBEDDING_THRESHOLD": "0.74",
+        "INTENT_EMBEDDING_MARGIN": "0.05",
+    }
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service.config, "_config_file", tmp_path / "config.json")
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": dict(current)})
+    monkeypatch.setattr(cli.service.config, "get_config_source", lambda key: "config_file" if key in current else "default")
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--intent-embedding-model",
+        "Qwen/Qwen3-Embedding-8B",
+    ])
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == cli.EXIT_OK
+    assert saved == {"INTENT_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-8B"}
+    assert "warnings" in data
+    assert any("INTENT_EMBEDDING_THRESHOLD" in warning and "0.475" in warning for warning in data["warnings"])
+    assert any("INTENT_EMBEDDING_MARGIN" in warning and "0.053" in warning for warning in data["warnings"])
+
+
+def test_setup_non_interactive_warns_without_overwriting_env_embedding_thresholds(monkeypatch, tmp_path, capsys):
+    saved = {}
+    monkeypatch.setattr(cli.service.config, "_config_file", tmp_path / "config.json")
+    monkeypatch.setenv("INTENT_EMBEDDING_THRESHOLD", "0.74")
+    monkeypatch.setenv("INTENT_EMBEDDING_MARGIN", "0.05")
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": {}})
+
+    code = cli.main([
+        "setup",
+        "--non-interactive",
+        "--intent-embedding-model",
+        "Qwen/Qwen3-Embedding-8B",
+    ])
+    data = json.loads(capsys.readouterr().out)
+
+    assert code == cli.EXIT_OK
+    assert saved == {
+        "INTENT_EMBEDDING_API_URL": "https://api.siliconflow.cn/v1/embeddings",
+        "INTENT_EMBEDDING_MODEL": "Qwen/Qwen3-Embedding-8B",
+    }
+    assert any("INTENT_EMBEDDING_THRESHOLD" in warning and "0.475" in warning for warning in data["warnings"])
+    assert any("INTENT_EMBEDDING_MARGIN" in warning and "0.053" in warning for warning in data["warnings"])
 
 
 def test_setup_status_from_values_accepts_named_openai_compatible_pool():
@@ -1639,7 +2033,7 @@ def test_setup_unknown_skill_target_returns_parameter_error(monkeypatch, capsys)
 
 def test_setup_guided_installs_tui_selected_skill_targets(monkeypatch, tmp_path, capsys):
     saved = {}
-    answers = iter(["skip", "skip", "skip", "n"])
+    answers = iter(["n", "n"])
     checkbox_calls = []
 
     def fake_checkbox(message, choices):
@@ -1827,7 +2221,7 @@ def test_zhipu_prompt_allows_custom_search_engine(monkeypatch):
 
 def test_setup_guided_zh_groups_minimum_capabilities(monkeypatch, capsys):
     saved = {}
-    answers = iter(["xai", "", "context7", "tavily", "", "n", "n"])
+    answers = iter(["xai", "", "context7", "tavily", "", "n", "n", "n"])
     secrets = iter(["xai-test-secret", "context7-test-secret", "tavily-test-secret"])
 
     def fake_config_set(key, value):
@@ -1866,7 +2260,7 @@ def test_setup_guided_zh_groups_minimum_capabilities(monkeypatch, capsys):
 
 def test_setup_guided_zhipu_optional_reinforcement_saves_url_and_engine(monkeypatch, capsys):
     saved = {}
-    answers = iter(["skip", "skip", "skip", "zhipu", "official", "search_pro_quark", "n"])
+    answers = iter(["skip", "skip", "skip", "zhipu", "official", "search_pro_quark", "n", "n"])
     secrets = iter(["zhipu-test-secret"])
 
     def fake_config_set(key, value):
@@ -1934,7 +2328,7 @@ def test_setup_guided_uses_tui_defaults_for_configured_providers(monkeypatch, ca
 
 def test_setup_guided_en_reports_missing_minimum(monkeypatch, capsys):
     saved = {}
-    answers = iter(["skip", "skip", "skip", "n", "n"])
+    answers = iter(["skip", "skip", "skip", "n", "n", "n"])
 
     def fake_config_set(key, value):
         saved[key] = value
@@ -1966,7 +2360,7 @@ def test_setup_guided_masks_configured_url_defaults(monkeypatch, capsys):
         "OPENAI_COMPATIBLE_API_URL": "https://private-relay.example.com/v1",
         "OPENAI_COMPATIBLE_API_KEY": "relay-old-secret",
     }
-    answers = iter(["openai", "", "", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["openai", "", "", "", "", "skip", "skip", "n", "n", "n"])
     secrets = iter([""])
 
     monkeypatch.setattr(cli.service, "config_set", lambda key, value: {"ok": True, "key": key, "value": "***"})
@@ -1985,7 +2379,7 @@ def test_setup_guided_masks_configured_url_defaults(monkeypatch, capsys):
 
 def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, capsys):
     saved = {}
-    answers = iter(["openai", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["openai", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n", "n"])
     secrets = iter(["relay-test-secret"])
 
     def fake_config_set(key, value):
@@ -2015,7 +2409,7 @@ def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, c
 
 def test_setup_guided_main_search_can_save_both_peer_providers(monkeypatch, capsys):
     saved = {}
-    answers = iter(["both", "", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["both", "", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n", "n"])
     secrets = iter(["xai-test-secret", "relay-test-secret"])
 
     def fake_config_set(key, value):
@@ -2041,9 +2435,105 @@ def test_setup_guided_main_search_can_save_both_peer_providers(monkeypatch, caps
     assert data["capability_status"]["main_search"]["fallback_chain"] == ["xai-responses", "openai-compatible"]
 
 
+def test_setup_guided_can_configure_intent_router(monkeypatch, capsys):
+    saved = {}
+    answers = iter([
+        "skip",
+        "skip",
+        "skip",
+        "skip",
+        "n",
+        "y",
+        "hybrid",
+        "y",
+        "https://api.example.com/v1/embeddings",
+        "embed-model",
+        "y",
+        "https://classifier.example.com/v1/chat/completions",
+        "intent-mini",
+        "30",
+    ])
+    secrets = iter(["embed-test-secret", "classifier-test-secret"])
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": saved.copy()})
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(secrets))
+
+    code = cli.main(["setup", "--skip-skills", "--lang", "en"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_OK
+    assert json.loads(captured.out)["minimum_profile_ok"] is False
+    assert saved == {
+        "SMART_SEARCH_INTENT_ROUTER": "hybrid",
+        "INTENT_EMBEDDING_API_URL": "https://api.example.com/v1/embeddings",
+        "INTENT_EMBEDDING_API_KEY": "embed-test-secret",
+        "INTENT_EMBEDDING_MODEL": "embed-model",
+        "INTENT_CLASSIFIER_API_URL": "https://classifier.example.com/v1/chat/completions",
+        "INTENT_CLASSIFIER_API_KEY": "classifier-test-secret",
+        "INTENT_CLASSIFIER_MODEL": "intent-mini",
+        "INTENT_ROUTER_TIMEOUT_SECONDS": "30",
+    }
+    assert "smart intent routing" in captured.err
+    assert "embeddings semantic routing" in captured.err
+    assert "classifier model routing" in captured.err
+    assert "embed-test-secret" not in captured.out
+    assert "embed-test-secret" not in captured.err
+    assert "classifier-test-secret" not in captured.out
+    assert "classifier-test-secret" not in captured.err
+
+
+def test_setup_guided_autofills_qwen3_8b_embedding_preset(monkeypatch, capsys):
+    saved = {}
+    answers = iter([
+        "skip",
+        "skip",
+        "skip",
+        "skip",
+        "n",
+        "y",
+        "hybrid",
+        "y",
+        "",
+        "",
+        "n",
+        "30",
+    ])
+    secrets = iter(["embed-test-secret"])
+
+    def fake_config_set(key, value):
+        saved[key] = value
+        return {"ok": True, "key": key, "value": "***", "config_file": "C:/tmp/config.json"}
+
+    monkeypatch.setattr(cli.service, "config_set", fake_config_set)
+    monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
+    monkeypatch.setattr(cli.service, "config_list", lambda show_secrets=False: {"ok": True, "values": saved.copy()})
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(secrets))
+
+    code = cli.main(["setup", "--skip-skills", "--lang", "en"])
+    captured = capsys.readouterr()
+
+    assert code == cli.EXIT_OK
+    assert saved["INTENT_EMBEDDING_API_URL"] == "https://api.siliconflow.cn/v1/embeddings"
+    assert saved["INTENT_EMBEDDING_API_KEY"] == "embed-test-secret"
+    assert saved["INTENT_EMBEDDING_MODEL"] == "Qwen/Qwen3-Embedding-8B"
+    assert saved["INTENT_EMBEDDING_THRESHOLD"] == "0.475"
+    assert saved["INTENT_EMBEDDING_MARGIN"] == "0.053"
+    assert "Recommended preset" in captured.err
+    assert "embed-test-secret" not in captured.out
+    assert "embed-test-secret" not in captured.err
+
+
 def test_setup_interactive_language_prompt(monkeypatch, capsys):
     saved = {}
-    answers = iter(["en", "skip", "skip", "skip", "n", "n"])
+    answers = iter(["en", "skip", "skip", "skip", "n", "n", "n"])
 
     monkeypatch.setattr(cli.service, "config_set", lambda key, value: {"ok": True, "value": "***"})
     monkeypatch.setattr(cli.service, "config_path", lambda: {"ok": True, "config_file": "C:/tmp/config.json"})
@@ -2082,9 +2572,168 @@ def test_search_passes_routing_options(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["content"] == "Answer"
 
 
+def test_route_command_outputs_json_markdown_and_content(monkeypatch, capsys):
+    async def fake_route(query, validation="", mode="", allow_remote=True):
+        return {
+            "ok": True,
+            "query": query,
+            "docs_intent": True,
+            "zh_current_intent": False,
+            "web_current_intent": False,
+            "fetch_intent": False,
+            "supplemental_paths": ["docs_search"],
+            "intent_router_mode": mode or "hybrid",
+            "required_capabilities": ["docs_search"],
+            "intent_signals": {"docs_api_intent": True},
+            "confidence": 0.82,
+            "router_engines_used": ["rules"],
+            "degraded": True,
+            "degraded_reason": "embeddings not configured",
+            "reasons": ["rules matched docs/API/library terms"],
+            "embedding_model": "embed-model",
+            "embedding_threshold": 0.74,
+            "embedding_margin": 0.05,
+            "embedding_threshold_source": "default",
+            "embedding_margin_source": "default",
+            "embedding_preset_id": "qwen3-embedding-8b",
+            "embedding_preset_threshold": "0.475",
+            "embedding_preset_margin": "0.053",
+            "embedding_preset_recommended": True,
+            "embedding_preset_recommendation": "Qwen/Qwen3-Embedding-8B works best with calibrated threshold and margin.",
+            "embedding_preset_commands": [
+                "smart-search config set INTENT_EMBEDDING_THRESHOLD 0.475",
+                "smart-search config set INTENT_EMBEDDING_MARGIN 0.053",
+            ],
+            "validation_level": validation or "balanced",
+            "executed_search": False,
+            "provider_selection": "not_executed",
+        }
+
+    monkeypatch.setattr(cli.service, "route", fake_route)
+
+    assert cli.main(["route", "React useEffect API docs", "--format", "json"]) == cli.EXIT_OK
+    json_data = json.loads(capsys.readouterr().out)
+    assert json_data["required_capabilities"] == ["docs_search"]
+    assert json_data["executed_search"] is False
+
+    assert cli.main(["rt", "React useEffect API docs", "--router-mode", "rules", "--format", "markdown"]) == cli.EXIT_OK
+    markdown = capsys.readouterr().out
+    assert markdown.startswith("# Intent Route")
+    assert "Required capabilities: `docs_search`" in markdown
+    assert "Embedding threshold: `0.74` (default)" in markdown
+    assert "Embedding Preset Recommendation" in markdown
+    assert "smart-search config set INTENT_EMBEDDING_THRESHOLD 0.475" in markdown
+    assert "rules matched docs/API/library terms" in markdown
+
+    assert cli.main(["route", "React useEffect API docs", "--format", "content"]) == cli.EXIT_OK
+    content = capsys.readouterr().out
+    assert "capabilities=docs_search" in content
+    assert "mode=hybrid" in content
+    assert "threshold=0.74(default)" in content
+    assert "embedding_preset_recommendation=threshold=0.475 margin=0.053" in content
+
+
+def test_route_calibrate_command_outputs_json_markdown_and_content(monkeypatch, capsys):
+    async def fake_route_calibrate(models=""):
+        return {
+            "ok": True,
+            "metric": "semantic_macro_f1",
+            "primary_metric": "semantic_macro_f1",
+            "models": [item.strip() for item in models.split(",") if item.strip()],
+            "dataset_size": 100,
+            "recommended_model": "good-model",
+            "recommended_threshold": 0.71,
+            "recommended_margin": 0.06,
+            "failed_models": ["bad-model"],
+            "model_results": [
+                {
+                    "model": "good-model",
+                    "ok": True,
+                    "dimension": 1024,
+                    "latency_ms": 12.3,
+                    "semantic_macro_f1": 0.95,
+                    "full_route_macro_f1": 0.9,
+                    "recommended_threshold": 0.71,
+                    "recommended_margin": 0.06,
+                    "semantic_failures": [
+                        {
+                            "id": "none-01",
+                            "query": "普通问题",
+                            "expected": "none",
+                            "predicted": "docs_search",
+                            "top_capability": "docs_search",
+                            "top_score": 0.77,
+                            "margin": 0.02,
+                        }
+                    ],
+                },
+                {
+                    "model": "bad-model",
+                    "ok": False,
+                    "error_type": "provider_error",
+                    "error": "model unavailable",
+                    "dimension": 0,
+                    "latency_ms": 0,
+                    "semantic_macro_f1": 0,
+                    "full_route_macro_f1": 0,
+                },
+            ],
+        }
+
+    monkeypatch.setattr(cli.service, "route_calibrate", fake_route_calibrate)
+
+    assert cli.main(["route-calibrate", "--models", "good-model,bad-model", "--format", "json"]) == cli.EXIT_OK
+    json_data = json.loads(capsys.readouterr().out)
+    assert json_data["recommended_model"] == "good-model"
+    assert json_data["failed_models"] == ["bad-model"]
+
+    assert cli.main(["route-cal", "--models", "good-model,bad-model", "--format", "markdown"]) == cli.EXIT_OK
+    markdown = capsys.readouterr().out
+    assert markdown.startswith("# Route Calibration")
+    assert "good-model" in markdown
+    assert "bad-model" in markdown
+    assert not markdown.lstrip().startswith("{")
+
+    assert cli.main(["rcal", "--models", "good-model,bad-model", "--format", "content"]) == cli.EXIT_OK
+    content = capsys.readouterr().out
+    assert "Route calibration OK" in content
+    assert "recommended=good-model" in content
+    assert not content.lstrip().startswith("{")
+
+
+def test_route_calibrate_provider_error_uses_network_exit(monkeypatch, capsys):
+    async def fake_route_calibrate(models=""):
+        return {
+            "ok": False,
+            "error_type": "provider_error",
+            "error": "No embedding model could be calibrated. See model_results for per-model errors.",
+            "metric": "semantic_macro_f1",
+            "primary_metric": "semantic_macro_f1",
+            "models": ["bad-model"],
+            "dataset_size": 100,
+            "recommended_model": "",
+            "failed_models": ["bad-model"],
+            "model_results": [
+                {"model": "bad-model", "ok": False, "error_type": "provider_error", "error": "model unavailable"}
+            ],
+        }
+
+    monkeypatch.setattr(cli.service, "route_calibrate", fake_route_calibrate)
+
+    code = cli.main(["route-calibrate", "--models", "bad-model", "--format", "content"])
+
+    assert code == cli.EXIT_NETWORK_ERROR
+    out = capsys.readouterr().out
+    assert "Route calibration FAIL" in out
+    assert "failed=bad-model" in out
+
+
 def test_smoke_command_uses_service(monkeypatch, capsys):
     async def fake_smoke(mode="mock"):
         return {"ok": True, "mode": mode, "failed_cases": [], "cases": []}
+
+    async def fake_research(*args, **kwargs):
+        return {"ok": True, "query_mode": "research", "content": "Research"}
 
     monkeypatch.setattr(cli.service, "smoke", fake_smoke)
 
@@ -2135,6 +2784,55 @@ def test_anysearch_commands_use_service_wrappers(monkeypatch, capsys):
     ]
 
 
+def test_zhipu_mcp_commands_use_service_wrappers(monkeypatch, capsys):
+    calls = []
+
+    async def fake_search(query, count=5):
+        calls.append(("search", query, count))
+        return {"ok": True, "provider": "zhipu-mcp", "tool": "web_search_prime", "results": []}
+
+    async def fake_reader(url):
+        calls.append(("reader", url))
+        return {"ok": True, "provider": "zhipu-mcp-reader", "tool": "webReader", "content": "# Page"}
+
+    async def fake_search_doc(repo, query, max_results=5):
+        calls.append(("search_doc", repo, query, max_results))
+        return {"ok": True, "provider": "zhipu-mcp-zread", "tool": "search_doc", "results": []}
+
+    async def fake_repo_structure(repo, ref=""):
+        calls.append(("repo_structure", repo, ref))
+        return {"ok": True, "provider": "zhipu-mcp-zread", "tool": "get_repo_structure", "content": "tree"}
+
+    async def fake_read_file(repo, path, ref=""):
+        calls.append(("read_file", repo, path, ref))
+        return {"ok": True, "provider": "zhipu-mcp-zread", "tool": "read_file", "content": "file"}
+
+    monkeypatch.setattr(cli.service, "zhipu_mcp_search", fake_search)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_reader", fake_reader)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_search_doc", fake_search_doc)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_repo_structure", fake_repo_structure)
+    monkeypatch.setattr(cli.service, "zhipu_mcp_read_file", fake_read_file)
+
+    assert cli.main(["zhipu-mcp-search", "news", "--count", "2"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "web_search_prime"
+    assert cli.main(["zmcp-reader", "https://example.com"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "webReader"
+    assert cli.main(["zmcp-doc", "owner/repo", "install", "--max-results", "3"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "search_doc"
+    assert cli.main(["zmcp-tree", "owner/repo", "--ref", "main"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "get_repo_structure"
+    assert cli.main(["zmcp-file", "owner/repo", "README.md", "--ref", "main"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["tool"] == "read_file"
+
+    assert calls == [
+        ("search", "news", 2),
+        ("reader", "https://example.com"),
+        ("search_doc", "owner/repo", "install", 3),
+        ("repo_structure", "owner/repo", "main"),
+        ("read_file", "owner/repo", "README.md", "main"),
+    ]
+
+
 def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
     async def fake_exa_search(*args, **kwargs):
         return {"ok": True, "provider": "exa"}
@@ -2163,6 +2861,9 @@ def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
     async def fake_smoke(mode="mock"):
         return {"ok": True, "mode": mode, "failed_cases": [], "cases": []}
 
+    async def fake_research(*args, **kwargs):
+        return {"ok": True, "query_mode": "research", "content": "Research"}
+
     monkeypatch.setattr(cli.service, "exa_search", fake_exa_search)
     monkeypatch.setattr(cli.service, "zhipu_search", fake_zhipu_search)
     monkeypatch.setattr(cli.service, "context7_library", fake_context7_library)
@@ -2172,6 +2873,7 @@ def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
     monkeypatch.setattr(cli.service, "anysearch_extract", fake_anysearch_extract)
     monkeypatch.setattr(cli.service, "anysearch_batch", fake_anysearch_batch)
     monkeypatch.setattr(cli.service, "smoke", fake_smoke)
+    monkeypatch.setattr(cli.service, "research", fake_research)
 
     assert cli.main(["exa", "query"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["provider"] == "exa"
@@ -2189,6 +2891,8 @@ def test_provider_and_smoke_aliases_use_canonical_commands(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["provider"] == "context7-library"
     assert cli.main(["c7docs", "/facebook/react", "hooks"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["provider"] == "context7-docs"
+    assert cli.main(["rs", "query"]) == cli.EXIT_OK
+    assert json.loads(capsys.readouterr().out)["query_mode"] == "research"
     assert cli.main(["sm"]) == cli.EXIT_OK
     assert json.loads(capsys.readouterr().out)["mode"] == "mock"
 

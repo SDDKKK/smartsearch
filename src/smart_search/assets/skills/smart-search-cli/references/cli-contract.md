@@ -17,10 +17,16 @@
 ## Commands
 
 - `smart-search search QUERY [--platform NAME] [--model ID] [--extra-sources N] [--validation fast|balanced|strict] [--fallback auto|off] [--providers auto|CSV] [--stream|--no-stream] [--timeout SECONDS] [--format json|markdown|content] [--output PATH]`
+- `smart-search route QUERY [--validation fast|balanced|strict] [--router-mode hybrid|rules|off] [--format json|markdown|content] [--output PATH]`
 - `smart-search fetch URL [--format json|markdown|content] [--output PATH]`
 - `smart-search exa-search QUERY [--num-results N] [--search-type neural|keyword|auto] [--include-text] [--include-highlights] [--start-published-date YYYY-MM-DD] [--include-domains DOMAIN...] [--exclude-domains DOMAIN...] [--category NAME] [--format json|markdown|content] [--output PATH]`
 - `smart-search exa-similar URL [--num-results N] [--format json|markdown|content] [--output PATH]`
 - `smart-search zhipu-search QUERY [--count N] [--search-engine NAME] [--search-recency-filter VALUE] [--search-domain-filter DOMAIN] [--content-size medium|high] [--format json|markdown|content] [--output PATH]`
+- `smart-search zhipu-mcp-search QUERY [--count N] [--format json|markdown|content] [--output PATH]`
+- `smart-search zhipu-mcp-reader URL [--format json|markdown|content] [--output PATH]`
+- `smart-search zhipu-mcp-search-doc REPO QUERY [--max-results N] [--format json|markdown|content] [--output PATH]`
+- `smart-search zhipu-mcp-repo-structure REPO [--ref REF] [--format json|markdown|content] [--output PATH]`
+- `smart-search zhipu-mcp-read-file REPO PATH [--ref REF] [--format json|markdown|content] [--output PATH]`
 - `smart-search anysearch-domains [DOMAIN] [--format json|markdown|content] [--output PATH]`
 - `smart-search anysearch-search QUERY [--domain DOMAIN] [--sub-domain SUB_DOMAIN] [--max-results N] [--format json|markdown|content] [--output PATH]`
 - `smart-search anysearch-extract URL [--max-length N] [--format json|markdown|content] [--output PATH]`
@@ -28,10 +34,12 @@
 - `smart-search context7-library NAME [QUERY] [--format json|markdown|content] [--output PATH]`
 - `smart-search context7-docs LIBRARY_ID QUERY [--format json|markdown|content] [--output PATH]`
 - `smart-search deep QUERY [--budget quick|standard|deep] [--evidence-dir PATH] [--format json|markdown|content] [--output PATH]`
+- `smart-search research QUERY [--budget quick|standard|deep] [--evidence-dir PATH] [--fallback auto|off] [--format json|markdown|content] [--output PATH]`
+- `smart-search route-calibrate [--models CSV] [--format json|markdown|content] [--output PATH]`
 - `smart-search map URL [--instructions TEXT] [--max-depth N] [--max-breadth N] [--limit N] [--timeout SECONDS] [--format json|markdown|content] [--output PATH]`
 - `smart-search doctor [--format json|markdown|content] [--output PATH]`
 - `smart-search diagnose openai-compatible [--timeout SECONDS] [--format json|markdown] [--output PATH]`
-- `smart-search setup [--lang zh|en] [--advanced] [--non-interactive] [--skip-skills] [--install-skills CSV] [--skills-root PATH] [--xai-api-url URL] [--xai-api-key KEY] [--xai-model ID] [--xai-tools-explicit CSV] [--openai-compatible-api-url URL] [--openai-compatible-api-key KEY] [--openai-compatible-model ID] [--openai-compatible-stream true|false] [--validation-level fast|balanced|strict] [--fallback-mode auto|off] [--minimum-profile standard|off] [--exa-key KEY] [--context7-key KEY] [--zhipu-key KEY] [--zhipu-api-url URL] [--zhipu-search-engine ENGINE] [--tavily-api-url URL] [--tavily-key KEY] [--firecrawl-api-url URL] [--firecrawl-key KEY] [--anysearch-api-url URL] [--anysearch-key KEY] [--anysearch-timeout SECONDS] [--format json|markdown|content] [--output PATH]`
+- `smart-search setup [--lang zh|en] [--advanced] [--non-interactive] [--skip-skills] [--install-skills CSV] [--skills-root PATH] [--xai-api-url URL] [--xai-api-key KEY] [--xai-model ID] [--xai-tools-explicit CSV] [--openai-compatible-api-url URL] [--openai-compatible-api-key KEY] [--openai-compatible-model ID] [--openai-compatible-stream true|false] [--validation-level fast|balanced|strict] [--fallback-mode auto|off] [--minimum-profile standard|off] [--intent-router hybrid|rules|off] [--intent-embedding-api-url URL] [--intent-embedding-api-key KEY] [--intent-embedding-model ID] [--intent-embedding-threshold FLOAT] [--intent-embedding-margin FLOAT] [--intent-classifier-api-url URL] [--intent-classifier-api-key KEY] [--intent-classifier-model ID] [--intent-router-timeout SECONDS] [--exa-key KEY] [--context7-key KEY] [--zhipu-key KEY] [--zhipu-api-url URL] [--zhipu-search-engine ENGINE] [--zhipu-mcp-key KEY] [--zhipu-mcp-search-api-url URL] [--zhipu-mcp-reader-api-url URL] [--zhipu-mcp-zread-api-url URL] [--zhipu-mcp-timeout SECONDS] [--jina-key KEY] [--jina-reader-api-url URL] [--jina-respond-with MODE] [--jina-timeout SECONDS] [--tavily-api-url URL] [--tavily-key KEY] [--firecrawl-api-url URL] [--firecrawl-key KEY] [--anysearch-api-url URL] [--anysearch-key KEY] [--anysearch-timeout SECONDS] [--format json|markdown|content] [--output PATH]`
 - `smart-search config path [--format json|markdown|content] [--output PATH]`
 - `smart-search config list [--format json|markdown|content] [--output PATH]`
 - `smart-search config set KEY VALUE [--format json|markdown|content] [--output PATH]`
@@ -50,11 +58,17 @@ Top-level aliases must normalize to the same service behavior as their full comm
 | --- | --- |
 | `smart-search --version` | `smart-search --v`, `smart-search -v` |
 | `search` | `s` |
+| `route` | `rt` |
 | `fetch` | `f` |
 | `map` | `m` |
 | `exa-search` | `exa`, `x` |
 | `exa-similar` | `xs` |
 | `zhipu-search` | `z`, `zp` |
+| `zhipu-mcp-search` | `zmcp-search` |
+| `zhipu-mcp-reader` | `zmcp-reader` |
+| `zhipu-mcp-search-doc` | `zmcp-doc` |
+| `zhipu-mcp-repo-structure` | `zmcp-tree` |
+| `zhipu-mcp-read-file` | `zmcp-file` |
 | `anysearch-domains` | `as-domains` |
 | `anysearch-search` | `as-search`, `as` |
 | `anysearch-extract` | `as-extract` |
@@ -62,6 +76,8 @@ Top-level aliases must normalize to the same service behavior as their full comm
 | `context7-library` | `c7`, `ctx7` |
 | `context7-docs` | `c7d`, `c7docs`, `ctx7-docs` |
 | `deep` | `dr` |
+| `research` | `rs` |
+| `route-calibrate` | `route-cal`, `rcal` |
 | `doctor` | `d` |
 | `diagnose` | `diag` |
 | `setup` | `init` |
@@ -85,11 +101,15 @@ Nested aliases:
 
 Successful search output includes `ok`, `query`, `primary_api_mode`, `content`, `sources`, `sources_count`, `primary_sources`, `primary_sources_count`, `extra_sources`, `extra_sources_count`, `source_warning`, `routing_decision`, `providers_used`, `provider_attempts`, `fallback_used`, `validation_level`, and `elapsed_ms`. Each source should include at least `url` when available.
 
+Route diagnostic output includes `ok`, `query`, `executed_search=false`, `provider_selection=not_executed`, backward-compatible fields `docs_intent`, `zh_current_intent`, `web_current_intent`, `fetch_intent`, `supplemental_paths`, and unified intent-router fields `intent_router_mode`, `required_capabilities`, `intent_signals`, `confidence`, `router_engines_used`, `degraded`, `degraded_reason`, `reasons`, `embedding_model`, `embedding_threshold`, `embedding_margin`, `embedding_threshold_source`, and `embedding_margin_source`. `smart-search route` must not call search/docs/fetch providers.
+
+Route calibration output includes `ok`, `metric`, `primary_metric=semantic_macro_f1`, `full_route_metric_role=validation`, `models`, `model_results`, `dataset_size`, `dataset_counts`, `capabilities`, `recommended_model`, `recommended_threshold`, `recommended_margin`, and `failed_models`. Each model result records `ok`, `model`, availability/error fields, embedding `dimension`, `latency_ms`, `semantic_macro_f1`, `full_route_macro_f1`, recommended threshold/margin, confusion matrices, and representative failures. A failed embedding model must be recorded as `ok=false` inside `model_results` without aborting the full calibration run.
+
 `--format json` is the stable machine-readable contract for agents and scripts. JSON output remains parseable and uses readable non-ASCII text when the terminal encoding supports it.
 
-`--format markdown` is the human-readable report format. `doctor --format markdown` must render a detailed diagnostic report with overall status, active/default/legacy config paths, log path resolution, file-logging status, masked config values with sources, minimum profile, capability status, main-search provider checks, provider connectivity checks, model metadata, and full long error/message detail instead of falling back to raw JSON. `diagnose openai-compatible --format markdown` must render a short copy-pasteable troubleshooting report with masked config, quick chat check, real search-shape `stream=false` and `stream=true` checks, a plain-language summary, and a next command. Provider list commands such as `exa-search`, `exa-similar`, `zhipu-search`, `anysearch-*`, `context7-library`, and `map` render result lists or a clear no-results message.
+`--format markdown` is the human-readable report format. `route --format markdown` must render the selected capabilities, engines, confidence, embedding model/threshold/margin, degradation reason, reasons, and signals without provider execution. `route-calibrate --format markdown` must render a model comparison report rather than raw JSON. `doctor --format markdown` must render a detailed diagnostic report with overall status, active/default/legacy config paths, log path resolution, file-logging status, masked config values with sources, minimum profile, capability status, main-search provider checks, provider connectivity checks, intent router status, embedding threshold/margin metadata, model metadata, and full long error/message detail instead of falling back to raw JSON. `diagnose openai-compatible --format markdown` must render a short copy-pasteable troubleshooting report with masked config, quick chat check, real search-shape `stream=false` and `stream=true` checks, a plain-language summary, and a next command. Provider list commands such as `exa-search`, `exa-similar`, `zhipu-search`, `anysearch-*`, `context7-library`, and `map` render result lists or a clear no-results message.
 
-`--format content` prints only the `content` field for content-bearing commands such as `search`, `fetch`, and `context7-docs`. Commands without a `content` field, including `doctor`, `smoke`, `config`, and `model`, must print a compact non-empty text summary rather than an empty stdout.
+`--format content` prints only the `content` field for content-bearing commands such as `search`, `fetch`, `context7-docs`, and `research`. Commands without a `content` field, including `route`, `route-calibrate`, `doctor`, `smoke`, `config`, and `model`, must print a compact non-empty text summary rather than an empty stdout.
 
 Source provenance fields:
 
@@ -104,7 +124,7 @@ Exa domain filters:
 - This normalization is intentional for Windows PowerShell, where an unquoted comma expression can be forwarded through `.ps1` wrappers as a space-separated value.
 - `source_warning`: non-empty when extra source candidates were appended.
 
-Fetch output includes `ok`, `url`, `provider`, `content`, and `elapsed_ms`.
+Fetch output includes `ok`, `url`, `provider`, `content`, `provider_attempts`, `fallback_used`, and `elapsed_ms`.
 
 Zhipu Web Search API setup:
 
@@ -118,11 +138,48 @@ Zhipu Web Search API setup:
 - `TAVILY_API_URL` only affects Tavily and does not proxy Zhipu.
 - `TAVILY_TIMEOUT_SECONDS` controls the Tavily `doctor` connectivity timeout. It defaults to `30` so slower pooled/community endpoints are not incorrectly marked unhealthy by the diagnostic check.
 
+Zhipu Coding Plan Remote MCP setup:
+
+- `ZHIPU_MCP_API_KEY` configures the Coding Plan MCP auth token and must be sent as `Authorization: Bearer ...`; it must never be logged unmasked.
+- `ZHIPU_MCP_SEARCH_API_URL` defaults to `https://open.bigmodel.cn/api/mcp/web_search_prime/mcp` and calls `web_search_prime` for `web_search`.
+- `ZHIPU_MCP_READER_API_URL` defaults to `https://open.bigmodel.cn/api/mcp/web_reader/mcp` and calls `webReader` for `web_fetch`.
+- `ZHIPU_MCP_ZREAD_API_URL` defaults to `https://open.bigmodel.cn/api/mcp/zread/mcp` and calls `search_doc`, `get_repo_structure`, and `read_file` through explicit repo/docs commands.
+- Zhipu Coding Plan MCP must be implemented as a separate Remote MCP-over-HTTP provider layer. Do not route it through the existing `/paas/v4/web_search` Zhipu REST provider.
+- A normal Zhipu Web Search API key is not sufficient evidence of Coding Plan entitlement. If `ZHIPU_MCP_API_KEY` is missing or returns auth/provider errors, MCP providers are skipped or fall through within the same capability; zread remains explicit and does not affect the standard minimum profile.
+- Provider failures must appear in `provider_attempts` and fallback must remain same-capability.
+- `doctor` should report configured/not-configured, auth, rate-limit, provider, timeout, and network status without exposing the MCP token.
+
+Jina Reader setup:
+
+- `JINA_READER_API_URL` defaults to `https://r.jina.ai`.
+- `JINA_API_KEY` is required before Jina satisfies `SMART_SEARCH_MINIMUM_PROFILE=standard`.
+- Anonymous Jina Reader calls may be used only as explicit/experimental degraded fetch behavior; they must not make standard setup pass.
+- `JINA_RESPOND_WITH=readerlm-v2` requires `JINA_API_KEY` and should report a configuration error without a network request when the key is missing.
+- Jina Reader is `web_fetch` only, not `web_search`.
+- Jina 401/403, 422, 429, timeout, network errors, and low-quality challenge pages such as `Title: Just a moment...` must be reported as failed provider attempts and allow same-capability fallback.
+
 OpenAI-compatible streaming:
 
 - `OPENAI_COMPATIBLE_STREAM` defaults to `false` and accepts `true`, `1`, or `yes` as true.
 - `search --stream` and `search --no-stream` override `OPENAI_COMPATIBLE_STREAM` for the current invocation.
 - Streaming applies only to OpenAI-compatible `search()` and provider-side `fetch()` calls. `describe_url()` and `rank_sources()` stay non-streaming. xAI Responses behavior is unchanged.
+
+Intent router:
+
+- `SMART_SEARCH_INTENT_ROUTER` accepts `hybrid`, `rules`, and `off`; default is `hybrid`.
+- `INTENT_EMBEDDING_API_URL`, `INTENT_EMBEDDING_API_KEY`, and `INTENT_EMBEDDING_MODEL` configure optional OpenAI-compatible embeddings for semantic capability routing.
+- `INTENT_EMBEDDING_THRESHOLD` defaults to `0.74`; `INTENT_EMBEDDING_MARGIN` defaults to `0.05`. Both are model-specific parameters. Normal setup should recommend the Qwen3-Embedding-8B preset: `INTENT_EMBEDDING_API_URL=https://api.siliconflow.cn/v1/embeddings`, `INTENT_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B`, `INTENT_EMBEDDING_THRESHOLD=0.475`, and `INTENT_EMBEDDING_MARGIN=0.053`.
+- When setup receives or prompts `Qwen/Qwen3-Embedding-8B` and threshold/margin are not explicitly configured, it auto-fills `0.475` and `0.053`. Explicit threshold/margin values win. Existing mismatched threshold/margin values should produce a warning rather than being silently overwritten.
+- Semantic routing may add a capability only when the top score is at least `INTENT_EMBEDDING_THRESHOLD` and the top-vs-second score gap is at least `INTENT_EMBEDDING_MARGIN`; otherwise ambiguous semantic matches are recorded as signals only.
+- `smart-search route-calibrate --models CSV` evaluates embedding models on the built-in calibration set. The primary selector is semantic-only Macro-F1; full-route Macro-F1 validates rules/classifier fallback behavior.
+- After changing `INTENT_EMBEDDING_MODEL`, changing embedding endpoints, or refreshing the real-query calibration set, users should rerun `route-calibrate` and then set `INTENT_EMBEDDING_THRESHOLD` and `INTENT_EMBEDDING_MARGIN` from the report.
+- `INTENT_CLASSIFIER_API_URL`, `INTENT_CLASSIFIER_API_KEY`, and `INTENT_CLASSIFIER_MODEL` configure optional OpenAI-compatible chat-completions classification.
+- `INTENT_ROUTER_TIMEOUT_SECONDS` defaults to `8` and applies only to optional remote router calls.
+- Hybrid mode is fail-open: missing or failing embeddings/classifier record `degraded=true` and `degraded_reason`, then local rules still route the request.
+- The router returns capabilities only: `docs_search`, `web_search`, `web_fetch`, and `vertical_search`. It must not select providers.
+- Classifier output is capability-whitelisted. Unknown capability names and provider names are ignored and recorded in route reasons.
+- `search` and `research` use the unified router. `deep` remains an offline planner and must not call embeddings or classifier components.
+- `doctor` and `route` report intent router mode, whether embeddings/classifier are configured, embedding model, threshold, margin, threshold/margin source, Qwen3-Embedding-8B preset recommendation/commands when mismatched, timeout, and that it degrades to rules. They must not expose router API keys.
 
 AnySearch experimental output:
 
@@ -143,13 +200,17 @@ Exa similar output includes `ok`, `url`, `results`, `total`, and `elapsed_ms` wh
 
 Zhipu search output includes `ok`, `query`, `provider`, `search_engine`, `results`, `total`, and `elapsed_ms` when successful.
 
+Zhipu MCP command output includes `ok`, `provider`, `tool`, `elapsed_ms`, and either `content` for reader/file-like tools or `results` plus `total` for search-like tools.
+
 Context7 library output includes `ok`, `query`, `provider`, `results`, `total`, and `elapsed_ms` when successful. Context7 docs output includes `ok`, `library_id`, `query`, `provider`, `results`, `total`, `content`, and `elapsed_ms` when successful.
 
 Map output includes `ok`, `base_url`, `results`, `response_time`, `url`, and `elapsed_ms` when successful.
 
-Deep planner output includes `ok`, `mode`, `query_mode`, `question`, `trigger_source`, `difficulty`, `intent_signals`, `decomposition`, `capability_plan`, `evidence_policy`, `preflight`, `steps`, `gap_check`, `final_answer_policy`, `usage_boundary`, `allowed_tools`, `evidence_dir`, and `elapsed_ms`. `smart-search deep` is offline by default: `preflight.executed_by_deep_command=false`, no provider calls are made, and live research only happens when an AI agent or user executes `steps[].command`.
+Deep planner output includes `ok`, `mode`, `query_mode`, `question`, `trigger_source`, `difficulty`, `intent_signals`, `decomposition`, `capability_plan`, `evidence_policy`, `preflight`, `steps`, `gap_check`, `final_answer_policy`, `usage_boundary`, `allowed_tools`, `evidence_dir`, and `elapsed_ms`. `smart-search deep` is offline by default: `preflight.executed_by_deep_command=false`, no provider calls are made, and live research only happens when an AI agent or user executes `steps[].command` or calls `smart-search research`.
 
-Diagnostic output masks keys, reports `config_file` / `config_dir` / `config_dir_source` / `default_config_file` / Windows legacy config metadata / `config_dir_override_value` / `config_dir_override_matches_default` / `log_dir_config_value` / `resolved_log_dir` / `file_logging_enabled` / `config_sources` / `primary_api_mode` / `primary_api_mode_source` / provider timeout values / `capability_status` / `minimum_profile_ok`, and includes `main_search_connection_tests` plus connection test objects for Exa, Tavily, Zhipu, Context7, and Firecrawl. `primary_connection_test` remains as a backward-compatible alias for the first configured main provider check. OpenAI-compatible provider health must be validated through `/chat/completions`; `/models` is supplementary metadata and must not be the health gate. Firecrawl currently reports whether `FIRECRAWL_API_KEY` is configured; it is not a live Firecrawl request.
+Research executor output includes `ok`, `mode=deep_research_execution`, `query_mode=research`, `question`, `budget`, `research_plan`, `routing_decision`, `stage_results`, `discovery_sources`, `final_answer`, `content`, `citations`, `evidence_items`, `gap_check`, `provider_attempts`, `providers_used`, `fallback_used`, `degraded`, `route_policy_version`, `evidence_dir`, `minimum_profile_ok`, `capability_status`, and `elapsed_ms`. Citations must come only from fetched/read `evidence_items`; discovery sources are candidates until fetched. If evidence cannot close, `research` returns degraded gaps instead of unsupported claims.
+
+Diagnostic output masks keys, reports `config_file` / `config_dir` / `config_dir_source` / `default_config_file` / Windows legacy config metadata / `config_dir_override_value` / `config_dir_override_matches_default` / `log_dir_config_value` / `resolved_log_dir` / `file_logging_enabled` / `config_sources` / `primary_api_mode` / `primary_api_mode_source` / provider timeout values / `capability_status` / `minimum_profile_ok` / `intent_router_status`, and includes `main_search_connection_tests` plus connection test objects for Exa, Tavily, Zhipu, Context7, and Firecrawl. `primary_connection_test` remains as a backward-compatible alias for the first configured main provider check. OpenAI-compatible provider health must be validated through `/chat/completions`; `/models` is supplementary metadata and must not be the health gate. Firecrawl currently reports whether `FIRECRAWL_API_KEY` is configured; it is not a live Firecrawl request.
 
 When a Windows user reports that different versions seem to use different config paths, diagnose in this order: `config_dir_source`, `config_dir_override_value`, `config_dir_override_matches_default`, then `legacy_windows_config_exists`. A source of `environment` with `config_dir_override_matches_default=true` means the active path is pinned by `SMART_SEARCH_CONFIG_DIR` but is functionally the same as the current default. Do not delete either config file or the user-level override until the upgraded CLI has been verified with `config path`, `doctor`, and smoke/regression checks.
 
@@ -157,7 +218,7 @@ Smoke output includes `ok`, `mode`, `failed_cases`, `cases`, `provider_attempts`
 
 ## Deep Research Skill Contract
 
-Deep Research is an optional capability orchestration workflow for prompts such as `深度搜索`, `深度调研`, `深入搜索`, `deep search`, `deep research`, multi-source verification, cross-checking, serious review, and selection/comparison research. `smart-search deep` is the public offline planner command for this workflow. It must not change default `smart-search search` behavior and must not execute live providers by default. The AI agent reads the generated plan, composes existing CLI commands, and lets the CLI perform execution and write JSON/Markdown evidence.
+Deep Research is an optional capability orchestration workflow for prompts such as `深度搜索`, `深度调研`, `深入搜索`, `deep search`, `deep research`, multi-source verification, cross-checking, serious review, and selection/comparison research. `smart-search deep` is the public offline planner command for this workflow. `smart-search research` is the public live executor command. It must not change default `smart-search search` behavior. `deep` must not execute live providers by default. `research` executes the staged workflow and writes JSON/Markdown evidence.
 
 Deep Research must not require fixed topic recipe ids such as `current_market_research`, `product_comparison_research`, `technical_docs_research`, `news_or_policy_research`, `claim_verification_research`, or `url_first_research`. Those phrases may appear as prompt examples, but they are not schema modes or routing enums.
 
@@ -203,13 +264,34 @@ Default Deep Research orchestration:
 
 `fetch_before_claim` means key claims must be backed by fetched page content. `primary_sources` and `extra_sources` are discovery candidates until fetched. Final answers should include fetched evidence, unverified candidate sources, and key commands used.
 
+When the user wants the CLI to execute the live workflow directly, call:
+
+```powershell
+smart-search research "question" --budget deep --fallback auto --format json --output C:\tmp\smart-search-evidence\research.json
+```
+
+`research --fallback auto` permits same-capability fallback inside selected routes. `research --fallback off` tries only the first selected provider in each capability route and is for debugging or provider comparison. Dynamic routing may reorder providers only inside the same capability. Every attempt must record capability, provider, status, error type, latency, and result count.
+
+Research provider advantage routing:
+
+- Context7 first for library/API/framework docs and docs retrieval.
+- Exa for official domains, papers, product/company pages, date/domain-filtered low-noise discovery, and adjacent-source discovery.
+- Zhipu REST for Chinese, domestic, current, policy, and announcement searches.
+- Zhipu MCP as a separate Coding Plan quota route through `web_search_prime` and `webReader`; do not mix it into `/paas/v4/web_search`.
+- Tavily for broad source discovery and site maps.
+- Jina for known public URL, PDF, and arXiv clean extraction; ReaderLM-v2 requires `JINA_API_KEY`.
+- Firecrawl for robust fetch fallback, JS-heavy/dynamic/browser-like extraction, OCR/PDF/structured extraction.
+- AnySearch only when vertical intent is clear, such as CVE, finance, legal, academic, and repository/codebase search.
+
+Safe research overrides are `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS`. They may reorder or disable providers only inside capabilities the provider already supports; they must not move a provider across capability boundaries.
+
 Planner closeout lessons:
 
 - Budget limits must not break evidence policy. Even `--budget quick` plans must retain at least one `fetch` step when claim-level conclusions are expected, and retained steps must keep valid `subquestion_id` links.
 - `steps[].command` and `steps[].output_path` are one contract. The `--output` path embedded in the executable command must match `output_path`; otherwise the AI agent cannot reliably find saved evidence.
 - Prefer PowerShell-safe quoted commands in generated plans because Windows users often copy planned steps directly from Markdown or JSON output.
 
-Deep Research smoke coverage is mock-full plus live-limited. Mock-full coverage should cover trigger phrases, normal search requests that should not trigger Deep Research, required `research_plan` fields, allowed tool whitelist, `fetch_before_claim`, evidence paths, capability boundaries, `intent_signals`, `capability_plan`, `gap_check`, simple current prompts such as `深度搜索一下最近的比特币行情`, docs/API prompts, claim-verification prompts, user-provided URL fetch-first flows, missing-provider failure guidance, and the rule that fixed topic recipe ids are not required schema. Live-limited coverage should run `doctor`, one broad `search`, one `exa-search`, and one `fetch` when real keys are available and live checks are expected. If a smoke issue is found, fix the affected docs/code/tests and rerun the affected smoke until it passes or is proven to be an external provider blocker.
+Deep Research smoke coverage is mock-full plus live-limited. Mock-full coverage should cover trigger phrases, normal search requests that should not trigger Deep Research, required `research_plan` fields, allowed tool whitelist, `fetch_before_claim`, evidence paths, capability boundaries, `intent_signals`, `capability_plan`, `gap_check`, simple current prompts such as `深度搜索一下最近的比特币行情`, docs/API prompts, claim-verification prompts, user-provided URL fetch-first flows, missing-provider failure guidance, research provider advantage routing, same-capability research fallback, and the rule that fixed topic recipe ids are not required schema. Live-limited coverage should run `doctor`, one broad `search`, one `exa-search`, and one `fetch` when real keys are available and live checks are expected; add one small `research` smoke when configured keys make it stable. If a smoke issue is found, fix the affected docs/code/tests and rerun the affected smoke until it passes or is proven to be an external provider blocker.
 
 Setup and config output should include `ok` and `config_file`. Saved API keys must be masked in command output.
 
@@ -251,8 +333,10 @@ Interactive setup behavior:
 - `smart-search setup --non-interactive --install-skills codex` remains the
   first-time setup compatibility path. Prefer `skills status` and
   `skills update` for routine global skill synchronization after CLI upgrades.
-- Required groups are `main_search`, `docs_search`, and `web_fetch`; `web_search` is optional reinforcement.
+- Required groups are `main_search`, `docs_search`, and `web_fetch`; `web_search` is optional reinforcement, followed by optional smart intent router configuration.
 - `--lang zh|en` skips the language question.
+- Default guided setup can configure `SMART_SEARCH_INTENT_ROUTER`, `INTENT_EMBEDDING_*`, `INTENT_CLASSIFIER_*`, and `INTENT_ROUTER_TIMEOUT_SECONDS` without `--advanced`; missing remote router pieces still degrade to rules.
+- Default guided setup recommends SiliconFlow + `Qwen/Qwen3-Embedding-8B` for embeddings and auto-fills threshold `0.475` plus margin `0.053` when no explicit threshold/margin exists.
 - `--advanced` shows low-level config keys one by one for compatibility with older setup behavior and does not show the skill prompt unless `--install-skills` is explicit.
 - `--non-interactive` keeps script behavior and only saves values passed as flags.
 - Unchecking a configured provider must not delete existing config values; use
@@ -293,6 +377,9 @@ Agent timeout handling contract:
 ## Provider Routing
 
 - `search` builds `main_search` from peer providers only: `XAI_API_KEY` registers official xAI Responses, while `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` registers OpenAI-compatible Chat Completions.
+- `search` uses unified `IntentRouter` output to populate `required_capabilities` and `supplemental_paths`; provider execution still follows the capability registry and same-capability fallback.
+- `research` reuses the unified `IntentRouter` before provider-advantage ordering.
+- `deep` uses offline rules/local signals only; it must not call remote embeddings or classifier components.
 - Official xAI calls use the Responses API `/responses` route through `XAI_*`. Compatible relays/gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
 - `OPENAI_COMPATIBLE_STREAM` and `search --stream/--no-stream` affect only the OpenAI-compatible Chat Completions transport for search/fetch. They do not change xAI Responses or provider-internal ranking/URL description tasks.
 - Legacy `SMART_SEARCH_API_URL`, `SMART_SEARCH_API_KEY`, `SMART_SEARCH_API_MODE`, `SMART_SEARCH_MODEL`, and `SMART_SEARCH_XAI_TOOLS` are unsupported config keys. `config set` / `config unset` must return a parameter error for them.
@@ -300,18 +387,22 @@ Agent timeout handling contract:
 - Chat Completions mode must not send xAI `web_search` / `x_search` tools or legacy `search_parameters`; xAI Chat Completions Live Search is deprecated.
 - Standard minimum profile requires `main_search`, `docs_search`, and fetch capability. Missing required capabilities produce a configuration error.
 - Optional experimental `vertical_search` may report AnySearch when `ANYSEARCH_API_KEY` is configured, but it is not part of the `web_search` fallback and is not required by the `standard` minimum profile.
+- Jina satisfies fetch capability only when `JINA_API_KEY` is configured. Anonymous Jina Reader does not satisfy `standard`.
 - Same-capability fallback is allowed; cross-capability fallback is not. Context7 is not used for unrelated broad web queries, and page extraction providers are not used as docs search providers.
 - `main_search`: xAI Responses first for Grok/xAI, then OpenAI-compatible answer fallback when that peer provider is separately configured and `--fallback auto` is active.
-- `web_search`: Zhipu first when routed in, then Tavily / Firecrawl source search when configured.
+- `web_search`: Zhipu Web Search API first when routed in, then Zhipu Coding Plan MCP `web_search_prime`, then Tavily / Firecrawl source search when configured.
 - `docs_search`: Context7 first for library/API/docs intent, then Exa for official-domain, paper, product-page, trusted-site, or low-noise supplemental discovery.
-- Fetch capability: Tavily first, then Firecrawl.
+- Fetch capability: Tavily first, then Jina Reader with `JINA_API_KEY`, then Zhipu Coding Plan MCP `webReader`, then Firecrawl.
 - `search` calls Tavily and/or Firecrawl only when `--extra-sources` is greater than 0.
 - If both Tavily and Firecrawl are configured, `search --extra-sources N` gives about 60% of extra source slots to Tavily and the remainder to Firecrawl.
 - `extra_sources` are retrieved in parallel and are not automatically used by the primary model to verify its answer.
-- `fetch` tries Tavily first, then Firecrawl as fallback when Tavily returns no content.
+- `fetch` and known-URL `search "https://..."` use the same fetch fallback chain.
+- `fetch` tries Tavily first, then Jina Reader with `JINA_API_KEY`, then Zhipu Coding Plan MCP Reader, then Firecrawl.
+- `research` uses capability-first plus provider-advantage routing. Fallback remains same-capability only; low-quality fetches, challenge pages, empty content, auth/rate/timeout/provider errors, and runtime errors are failed attempts that may trigger same-capability fallback.
 - `map` uses Tavily only.
 - `exa-search` and `exa-similar` use Exa only.
 - `zhipu-search` uses Zhipu only.
+- `zhipu-mcp-search`, `zhipu-mcp-reader`, and `zhipu-mcp-*` zread commands use Zhipu Coding Plan Remote MCP only.
 - `anysearch-domains`, `anysearch-search`, `anysearch-extract`, and `anysearch-batch` use AnySearch only and do not participate in default fallback chains.
 - `context7-library` and `context7-docs` use Context7 only.
 - Runtime config priority is environment variables first, then local config file, then defaults.
@@ -320,6 +411,7 @@ Agent timeout handling contract:
 
 ## Routing Heuristics
 
+- Use `smart-search route "query" --format markdown` when you need to explain why a query maps to `docs_search`, `web_search`, `web_fetch`, or `vertical_search` without executing providers.
 - Use `exa-search --include-domains` when official documentation domains are known.
 - Use `context7-library` / `context7-docs` for docs/API/SDK/library/framework intent when Context7 is configured.
 - Use `zhipu-search` for Chinese, domestic, current, or domain-filtered source discovery when Zhipu is configured.
