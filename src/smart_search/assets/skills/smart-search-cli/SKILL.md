@@ -33,8 +33,8 @@ Use the local `smart-search` command as the default execution layer for web rese
 
 ## Key Boundaries
 
-- `smart-search` should resolve from the user's PATH.
-- Private API keys should be saved with `smart-search setup` or `smart-search config set`; environment variables remain supported for CI and advanced users.
+- `smart-search` should resolve from the user's PATH. On hosts with a local wrapper, that wrapper should run the local `SDDKKK/smartsearch` fork checkout and inject the host provider environment; see `references/local-wrapper.md`.
+- Private API keys should be saved with `smart-search setup` or `smart-search config set`; environment variables and 1Password-backed wrapper env files remain supported for CI, advanced users, and multi-host Hiskens deployments.
 - In sandboxed runtimes, set `SMART_SEARCH_CONFIG_DIR` to an absolute writable path when the default config directory is unavailable or must be pinned.
 - The standard minimum profile requires one configured provider in each of `main_search`, `docs_search`, and fetch capability. Missing required capabilities are hard configuration failures.
 - Fallback must remain same-capability only. Do not use Context7 for broad news/web facts or page-extraction providers as documentation search replacements.
@@ -48,6 +48,7 @@ Use the local `smart-search` command as the default execution layer for web rese
 - Deep Research planner/executor workflow, plan fields, gap check, and smoke matrix: `references/deep-research-mode.md`
 - CLI entrypoints, command signatures, aliases, output fields, exit codes, and tool policy: `references/cli-core.md`
 - Setup, config storage, skill installation, provider endpoints, and OpenAI-compatible diagnostics: `references/setup-config.md`
+- Local PATH wrappers, checkout-local execution, 1Password `.env.tpl` injection, and host verification checks: `references/local-wrapper.md`
 - Intent routing, provider capabilities, source provenance, fallback boundaries, and routing maintenance: `references/provider-routing.md`
 - Regression, packaged install checks, release lanes, and release closeout lessons: `references/regression-release.md`
 - Compatibility reference map for older instructions that mention the original monolithic file: `references/cli-contract.md`
