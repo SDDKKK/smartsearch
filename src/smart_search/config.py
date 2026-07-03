@@ -34,6 +34,7 @@ class Config:
         "OPENAI_COMPATIBLE_API_URL",
         "OPENAI_COMPATIBLE_API_KEY",
         "OPENAI_COMPATIBLE_MODEL",
+        "OPENAI_COMPATIBLE_FALLBACK_MODELS",
         "OPENAI_COMPATIBLE_STREAM",
         "OPENAI_COMPATIBLE_PROVIDERS",
         "SMART_SEARCH_VALIDATION_LEVEL",
@@ -90,7 +91,7 @@ class Config:
         "SSL_VERIFY",
     }
     _LEGACY_CONFIG_KEYS: dict[str, str] = {}
-    _OPENAI_COMPATIBLE_DYNAMIC_FIELDS = {"API_URL", "API_KEY", "MODEL", "STREAM"}
+    _OPENAI_COMPATIBLE_DYNAMIC_FIELDS = {"API_URL", "API_KEY", "MODEL", "FALLBACK_MODELS", "STREAM"}
 
     def __new__(cls):
         if cls._instance is None:
@@ -214,6 +215,7 @@ class Config:
             "OPENAI_COMPATIBLE_API_URL",
             "OPENAI_COMPATIBLE_API_KEY",
             "OPENAI_COMPATIBLE_MODEL",
+            "OPENAI_COMPATIBLE_FALLBACK_MODELS",
             "OPENAI_COMPATIBLE_STREAM",
             "OPENAI_COMPATIBLE_PROVIDERS",
             "SMART_SEARCH_VALIDATION_LEVEL",
@@ -273,6 +275,7 @@ class Config:
                 "OPENAI_COMPATIBLE_API_URL",
                 "OPENAI_COMPATIBLE_API_KEY",
                 "OPENAI_COMPATIBLE_MODEL",
+                "OPENAI_COMPATIBLE_FALLBACK_MODELS",
                 "OPENAI_COMPATIBLE_STREAM",
             )
         ):
@@ -576,6 +579,36 @@ class Config:
         model = self._resolved_openai_compatible_value(1, "MODEL") or self._base_model_value()
         return self.apply_model_suffix_for_url(model, api_url)
 
+    def _openai_compatible_fallback_models_from_raw(self, raw: str | None, api_url: str, primary: str) -> list[str]:
+        models: list[str] = []
+        seen: set[str] = set()
+        for item in (raw or "").split(","):
+            model = item.strip()
+            if not model:
+                continue
+            model = self.apply_model_suffix_for_url(model, api_url)
+            if model == primary or model in seen:
+                continue
+            seen.add(model)
+            models.append(model)
+        return models
+
+    @property
+    def openai_compatible_fallback_models(self) -> list[str]:
+        provider_ids = self._openai_compatible_provider_ids()
+        if provider_ids:
+            first_provider = provider_ids[0]
+            api_url = self._named_openai_compatible_value(first_provider, "API_URL") or ""
+            primary = self.openai_compatible_model
+            raw = self._named_openai_compatible_value(first_provider, "FALLBACK_MODELS")
+            if raw is None:
+                raw = self._get_config_value("OPENAI_COMPATIBLE_FALLBACK_MODELS", "") or ""
+            return self._openai_compatible_fallback_models_from_raw(raw, api_url, primary)
+        api_url = self.openai_compatible_api_url or ""
+        primary = self.openai_compatible_model
+        raw = self._resolved_openai_compatible_value(1, "FALLBACK_MODELS", "") or ""
+        return self._openai_compatible_fallback_models_from_raw(raw, api_url, primary)
+
     @property
     def openai_compatible_stream(self) -> bool:
         provider_ids = self._openai_compatible_provider_ids()
@@ -601,6 +634,10 @@ class Config:
                 if not api_url or not api_key:
                     continue
                 model = self._named_openai_compatible_value(provider_id, "MODEL") or base_model
+                resolved_model = self.apply_model_suffix_for_url(model, api_url)
+                fallback_raw = self._named_openai_compatible_value(provider_id, "FALLBACK_MODELS")
+                if fallback_raw is None:
+                    fallback_raw = self._get_config_value("OPENAI_COMPATIBLE_FALLBACK_MODELS", "") or ""
                 stream_value = self._named_openai_compatible_value(provider_id, "STREAM")
                 stream = inherited_stream if stream_value is None else self._truthy(stream_value, default=inherited_stream)
                 providers.append(
@@ -610,7 +647,8 @@ class Config:
                         "mode": "chat-completions",
                         "api_url": api_url,
                         "api_key": api_key,
-                        "model": self.apply_model_suffix_for_url(model, api_url),
+                        "model": resolved_model,
+                        "fallback_models": self._openai_compatible_fallback_models_from_raw(fallback_raw, api_url, resolved_model),
                         "stream": stream,
                         "source": f"OPENAI_COMPATIBLE_{provider_key}_*",
                         "env_prefix": f"OPENAI_COMPATIBLE_{provider_key}",
@@ -624,6 +662,8 @@ class Config:
             if not api_url or not api_key:
                 continue
             model = self._resolved_openai_compatible_value(index, "MODEL") or base_model
+            resolved_model = self.apply_model_suffix_for_url(model, api_url)
+            fallback_raw = self._resolved_openai_compatible_value(index, "FALLBACK_MODELS", "") or ""
             stream_value = self._get_config_value(f"OPENAI_COMPATIBLE_{index}_STREAM")
             stream = inherited_stream if stream_value is None else self._truthy(stream_value, default=inherited_stream)
             uses_legacy_keys = index == 1 and not any(
@@ -638,7 +678,8 @@ class Config:
                     "mode": "chat-completions",
                     "api_url": api_url,
                     "api_key": api_key,
-                    "model": self.apply_model_suffix_for_url(model, api_url),
+                    "model": resolved_model,
+                    "fallback_models": self._openai_compatible_fallback_models_from_raw(fallback_raw, api_url, resolved_model),
                     "stream": stream,
                     "source": "OPENAI_COMPATIBLE_*" if uses_legacy_keys else f"OPENAI_COMPATIBLE_{index}_*",
                     "env_prefix": f"OPENAI_COMPATIBLE_{index}",
@@ -1033,6 +1074,7 @@ class Config:
             "OPENAI_COMPATIBLE_API_URL": self.openai_compatible_api_url or "未配置",
             "OPENAI_COMPATIBLE_API_KEY": self._mask_api_key(self.openai_compatible_api_key) if self.openai_compatible_api_key else "未配置",
             "OPENAI_COMPATIBLE_MODEL": self.openai_compatible_model,
+            "OPENAI_COMPATIBLE_FALLBACK_MODELS": ",".join(self.openai_compatible_fallback_models),
             "OPENAI_COMPATIBLE_STREAM": self.openai_compatible_stream,
             "OPENAI_COMPATIBLE_PROVIDERS": self._get_config_value("OPENAI_COMPATIBLE_PROVIDERS") or "",
             "SMART_SEARCH_VALIDATION_LEVEL": validation_level,

@@ -1409,6 +1409,8 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "relay-test-secret",
         "--openai-compatible-model",
         "relay-model",
+        "--openai-compatible-fallback-models",
+        "fallback-a,fallback-b",
         "--openai-compatible-stream",
         "true",
         "--validation-level",
@@ -1483,6 +1485,7 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["OPENAI_COMPATIBLE_API_URL"] == "https://relay.example.com/v1"
     assert saved["OPENAI_COMPATIBLE_API_KEY"] == "relay-test-secret"
     assert saved["OPENAI_COMPATIBLE_MODEL"] == "relay-model"
+    assert saved["OPENAI_COMPATIBLE_FALLBACK_MODELS"] == "fallback-a,fallback-b"
     assert saved["OPENAI_COMPATIBLE_STREAM"] == "true"
     assert saved["SMART_SEARCH_VALIDATION_LEVEL"] == "balanced"
     assert saved["SMART_SEARCH_FALLBACK_MODE"] == "auto"
@@ -2360,7 +2363,7 @@ def test_setup_guided_masks_configured_url_defaults(monkeypatch, capsys):
         "OPENAI_COMPATIBLE_API_URL": "https://private-relay.example.com/v1",
         "OPENAI_COMPATIBLE_API_KEY": "relay-old-secret",
     }
-    answers = iter(["openai", "", "", "", "", "skip", "skip", "n", "n", "n"])
+    answers = iter(["openai", "", "", "", "", "", "skip", "skip", "n", "n", "n"])
     secrets = iter([""])
 
     monkeypatch.setattr(cli.service, "config_set", lambda key, value: {"ok": True, "key": key, "value": "***"})
@@ -2379,7 +2382,7 @@ def test_setup_guided_masks_configured_url_defaults(monkeypatch, capsys):
 
 def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, capsys):
     saved = {}
-    answers = iter(["openai", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n", "n"])
+    answers = iter(["openai", "", "https://relay.example.com/v1", "", "", "", "skip", "skip", "n", "n", "n"])
     secrets = iter(["relay-test-secret"])
 
     def fake_config_set(key, value):
@@ -2409,7 +2412,7 @@ def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, c
 
 def test_setup_guided_main_search_can_save_both_peer_providers(monkeypatch, capsys):
     saved = {}
-    answers = iter(["both", "", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n", "n"])
+    answers = iter(["both", "", "", "https://relay.example.com/v1", "", "", "", "skip", "skip", "n", "n", "n"])
     secrets = iter(["xai-test-secret", "relay-test-secret"])
 
     def fake_config_set(key, value):

@@ -283,6 +283,9 @@ MAIN_SEARCH_PROVIDER_ALIASES = {
     "xai-responses": {"xai-responses", "xai", "grok", "grok-web-tools"},
     "openai-compatible": {"openai-compatible", "openai", "chat-completions", "primary"},
 }
+MODEL_BREAKER_FAILURE_THRESHOLD = 2
+MODEL_BREAKER_COOLDOWN_SECONDS = 600.0
+_OPENAI_COMPATIBLE_MODEL_BREAKERS: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _main_search_provider_aliases(provider_id: str) -> set[str]:
@@ -360,8 +363,9 @@ def _attempt(
     result_count: int = 0,
     error_type: str = "",
     error: str = "",
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    data = {
         "capability": capability,
         "provider": provider,
         "status": status,
@@ -370,6 +374,138 @@ def _attempt(
         "elapsed_ms": _elapsed_ms(start),
         "result_count": result_count,
     }
+    if extra:
+        data.update(extra)
+    return data
+
+
+def _openai_model_breaker_key(api_url: str, model: str) -> tuple[str, str]:
+    return (api_url.rstrip("/"), model)
+
+
+def reset_runtime_breakers() -> None:
+    _OPENAI_COMPATIBLE_MODEL_BREAKERS.clear()
+
+
+def _openai_model_breaker_state(api_url: str, model: str) -> dict[str, Any]:
+    key = _openai_model_breaker_key(api_url, model)
+    state = _OPENAI_COMPATIBLE_MODEL_BREAKERS.get(key, {})
+    opened_until = float(state.get("opened_until") or 0.0)
+    now = time.monotonic()
+    if opened_until and opened_until > now:
+        return {
+            "state": "open",
+            "opened_until_seconds": round(opened_until - now, 3),
+            "consecutive_failures": int(state.get("consecutive_failures") or 0),
+        }
+    if opened_until and opened_until <= now:
+        _OPENAI_COMPATIBLE_MODEL_BREAKERS.pop(key, None)
+        state = {}
+    return {"state": "closed", "consecutive_failures": int(state.get("consecutive_failures") or 0)}
+
+
+def _record_openai_model_success(api_url: str, model: str) -> None:
+    _OPENAI_COMPATIBLE_MODEL_BREAKERS.pop(_openai_model_breaker_key(api_url, model), None)
+
+
+def _record_openai_model_failure(api_url: str, model: str) -> dict[str, Any]:
+    key = _openai_model_breaker_key(api_url, model)
+    state = _OPENAI_COMPATIBLE_MODEL_BREAKERS.setdefault(key, {"consecutive_failures": 0, "opened_until": 0.0})
+    state["consecutive_failures"] = int(state.get("consecutive_failures") or 0) + 1
+    if state["consecutive_failures"] >= MODEL_BREAKER_FAILURE_THRESHOLD:
+        state["opened_until"] = time.monotonic() + MODEL_BREAKER_COOLDOWN_SECONDS
+    return _openai_model_breaker_state(api_url, model)
+
+
+def _openai_model_candidates(provider_config: dict[str, Any], *, fallback_mode: str, model_override: str) -> list[dict[str, Any]]:
+    primary_model = provider_config["model"]
+    candidates = [
+        {
+            **provider_config,
+            "model": primary_model,
+            "model_role": "primary",
+            "fallback_from_model": "",
+            "stream": provider_config.get("stream", False),
+        }
+    ]
+    if fallback_mode == "off" or model_override:
+        return candidates
+    for fallback_model in provider_config.get("fallback_models") or []:
+        candidates.append(
+            {
+                **provider_config,
+                "model": fallback_model,
+                "model_role": "fallback",
+                "fallback_from_model": primary_model,
+                "stream": False,
+            }
+        )
+    return candidates
+
+
+def _remaining_budget_seconds(start: float, timeout_seconds: float | None) -> float | None:
+    if timeout_seconds is None:
+        return None
+    return max(0.0, float(timeout_seconds) - (time.time() - start))
+
+
+def _attempt_timeout_seconds(
+    search_start: float,
+    timeout_seconds: float | None,
+    remaining_candidates: int,
+) -> float | None:
+    remaining_budget = _remaining_budget_seconds(search_start, timeout_seconds)
+    if remaining_budget is None:
+        return None
+    if remaining_budget <= 0:
+        return 0.001
+    if remaining_candidates <= 1:
+        return max(0.001, remaining_budget)
+    return max(0.001, min(30.0, remaining_budget / 2.0))
+
+
+def _openai_attempt_provider_name(candidate_config: dict[str, Any], search_provider: Any | None = None) -> str:
+    provider_id = str(candidate_config.get("provider") or "")
+    if provider_id.startswith(("openai-compatible:", "openai-compatible-")):
+        return provider_id
+    if search_provider is not None:
+        return search_provider.get_provider_name()
+    return "OpenAI-compatible"
+
+
+def _append_openai_transport_attempts(
+    provider_attempts: list[dict],
+    search_provider: Any,
+    candidate_config: dict[str, Any],
+) -> bool:
+    transport_attempts = getattr(search_provider, "last_transport_attempts", [])
+    if not str(candidate_config.get("provider", "")).startswith("openai-compatible") or not transport_attempts:
+        return False
+    provider_name = _openai_attempt_provider_name(candidate_config, search_provider)
+    for transport_attempt in transport_attempts:
+        transport_extra = {
+            key: value
+            for key, value in transport_attempt.items()
+            if key not in {"status", "error_type", "error", "elapsed_ms", "result_count"}
+        }
+        if candidate_config.get("fallback_from_model"):
+            transport_extra["fallback_from_model"] = candidate_config["fallback_from_model"]
+        provider_attempts.append(
+            {
+                **_attempt(
+                    "main_search",
+                    provider_name,
+                    transport_attempt.get("status", "error"),
+                    time.time(),
+                    result_count=int(transport_attempt.get("result_count") or 0),
+                    error_type=transport_attempt.get("error_type", ""),
+                    error=transport_attempt.get("error", ""),
+                ),
+                "elapsed_ms": transport_attempt.get("elapsed_ms", 0),
+                **transport_extra,
+            }
+        )
+    return True
 
 
 def _normalize_source_results(results: list[dict] | None, provider: str) -> list[dict]:
@@ -408,20 +544,22 @@ def _fallback_used(attempts: list[dict]) -> bool:
     by_capability: dict[str, list[dict]] = {}
     for attempt in attempts:
         capability = attempt.get("capability", "")
-        if attempt.get("status") in {"ok", "empty", "error"}:
+        if attempt.get("status") in {"ok", "empty", "error", "skipped"}:
             by_capability.setdefault(capability, []).append(attempt)
     for capability_attempts in by_capability.values():
         previous_failed = False
-        previous_provider = ""
+        previous_identity = ""
         for attempt in capability_attempts:
             provider = attempt.get("provider", "")
+            model = str(attempt.get("model") or "")
+            identity = f"{provider}:{model}" if provider == "OpenAI-compatible" and model else provider
             status = attempt.get("status")
-            if previous_failed:
+            if previous_identity and identity and identity != previous_identity:
                 return True
-            if previous_provider and provider and provider != previous_provider:
+            if previous_failed and identity != previous_identity:
                 return True
-            previous_failed = status in {"empty", "error"}
-            previous_provider = provider or previous_provider
+            previous_failed = status in {"empty", "error", "skipped"}
+            previous_identity = identity or previous_identity
     return False
 
 
@@ -1441,6 +1579,7 @@ def _main_search_provider_configs(model_override: str = "", providers: str = "au
             "api_url": api_url,
             "api_key": str(provider["api_key"]),
             "model": resolved_model,
+            "fallback_models": [] if model_override else list(provider.get("fallback_models") or []),
             "stream": bool(provider["stream"]),
             "tools": [],
             "source": provider["source"],
@@ -1921,6 +2060,7 @@ async def search(
     fallback: str = "",
     providers: str = "auto",
     stream: bool | None = None,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     start = time.time()
     session_id = new_session_id()
@@ -1994,6 +2134,12 @@ async def search(
         return _empty_search_result(start, session_id, query, "parameter_error", str(e), extra={"validation_level": validation_level})
     fetch_urls = _extract_urls(query)
     supplemental_paths = route_result.required_capabilities
+    openai_candidate_models = [
+        candidate["model"]
+        for item in selected_main_provider_configs
+        if str(item["provider"]).startswith("openai-compatible")
+        for candidate in _openai_model_candidates(item, fallback_mode=fallback_mode, model_override=model)
+    ]
     routing_decision = {
         **route_result.to_dict(),
         "validation_level": validation_level,
@@ -2004,50 +2150,140 @@ async def search(
             (bool(item.get("stream")) for item in selected_main_provider_configs if str(item["provider"]).startswith("openai-compatible")),
             False,
         ),
+        "openai_compatible_models": openai_candidate_models,
+        "openai_compatible_model_fallback_enabled": len(openai_candidate_models) > 1,
     }
 
     provider_attempts: list[dict] = []
-    main_providers = _main_search_providers(main_provider_configs, fallback_mode)
     primary_start = time.time()
     primary_result = None
     successful_main_config: dict[str, Any] | None = None
     last_primary_error: dict[str, Any] | None = None
-    for provider_config, search_provider in zip(selected_main_provider_configs, main_providers):
-        primary_start = time.time()
-        try:
-            candidate_result = await search_provider.search(query, platform)
-            if candidate_result:
-                primary_result = candidate_result
-                successful_main_config = provider_config
-                provider_attempts.append(_attempt("main_search", search_provider.get_provider_name(), "ok", primary_start, result_count=1))
-                break
-            last_primary_error = _primary_search_error_result(
+    model_fallback_used = False
+    transport_fallback_used = False
+    total_main_candidates = sum(
+        len(_openai_model_candidates(item, fallback_mode=fallback_mode, model_override=model))
+        if str(item["provider"]).startswith("openai-compatible")
+        else 1
+        for item in selected_main_provider_configs
+    )
+    completed_main_candidates = 0
+    for provider_config in selected_main_provider_configs:
+        provider_candidates = (
+            _openai_model_candidates(provider_config, fallback_mode=fallback_mode, model_override=model)
+            if str(provider_config["provider"]).startswith("openai-compatible")
+            else [provider_config]
+        )
+        for candidate_config in provider_candidates:
+            completed_main_candidates += 1
+            primary_start = time.time()
+            search_provider = _main_search_providers([candidate_config], fallback="auto")[0]
+            attempt_extra: dict[str, Any] = {}
+            if str(candidate_config["provider"]).startswith("openai-compatible"):
+                attempt_extra["model"] = candidate_config["model"]
+                attempt_extra["model_role"] = candidate_config.get("model_role", "primary")
+                if candidate_config.get("fallback_from_model"):
+                    attempt_extra["fallback_from_model"] = candidate_config["fallback_from_model"]
+                    model_fallback_used = True
+                breaker_state = _openai_model_breaker_state(candidate_config["api_url"], candidate_config["model"])
+                model_breaker_can_skip = fallback_mode != "off" and not model
+                if model_breaker_can_skip and breaker_state.get("state") == "open":
+                    attempt_extra["breaker_state"] = breaker_state
+                    provider_attempts.append(
+                        _attempt(
+                            "main_search",
+                            _openai_attempt_provider_name(candidate_config),
+                            "skipped",
+                            primary_start,
+                            error_type="network_error",
+                            error="model breaker open",
+                            extra=attempt_extra,
+                        )
+                    )
+                    continue
+            attempt_timeout = _attempt_timeout_seconds(
                 start,
-                session_id,
-                query,
-                provider_config["mode"],
-                "network_error",
-                f"{search_provider.get_provider_name()} 返回空结果",
+                timeout_seconds,
+                total_main_candidates - completed_main_candidates + 1,
             )
-            provider_attempts.append(_attempt("main_search", search_provider.get_provider_name(), "empty", primary_start))
-        except Exception as e:
-            error_result = _primary_search_exception_result(start, session_id, query, provider_config["mode"], search_provider.get_provider_name(), e)
-            last_primary_error = error_result
-            provider_attempts.append(
-                _attempt(
-                    "main_search",
-                    search_provider.get_provider_name(),
-                    "error",
-                    primary_start,
-                    error_type=error_result["error_type"],
-                    error=error_result["error"],
+            try:
+                if attempt_timeout is not None:
+                    candidate_result = await asyncio.wait_for(search_provider.search(query, platform), timeout=attempt_timeout)
+                else:
+                    candidate_result = await search_provider.search(query, platform)
+                transport_attempts = getattr(search_provider, "last_transport_attempts", [])
+                if _append_openai_transport_attempts(provider_attempts, search_provider, candidate_config):
+                    transport_fallback_used = transport_fallback_used or any(
+                        attempt.get("fallback_from_transport") for attempt in transport_attempts
+                    )
+                if candidate_result:
+                    primary_result = candidate_result
+                    successful_main_config = candidate_config
+                    if not str(candidate_config["provider"]).startswith("openai-compatible") or not transport_attempts:
+                        provider_attempts.append(
+                            _attempt(
+                                "main_search",
+                                _openai_attempt_provider_name(candidate_config, search_provider),
+                                "ok",
+                                primary_start,
+                                result_count=1,
+                                extra=attempt_extra,
+                            )
+                        )
+                    if str(candidate_config["provider"]).startswith("openai-compatible"):
+                        _record_openai_model_success(candidate_config["api_url"], candidate_config["model"])
+                    break
+                if str(candidate_config["provider"]).startswith("openai-compatible"):
+                    attempt_extra["breaker_state"] = _record_openai_model_failure(candidate_config["api_url"], candidate_config["model"])
+                last_primary_error = _primary_search_error_result(
+                    start,
+                    session_id,
+                    query,
+                    candidate_config["mode"],
+                    "network_error",
+                    f"{search_provider.get_provider_name()} 返回空结果",
                 )
-            )
+                if not str(candidate_config["provider"]).startswith("openai-compatible") or not transport_attempts:
+                    provider_attempts.append(
+                        _attempt(
+                            "main_search",
+                            _openai_attempt_provider_name(candidate_config, search_provider),
+                            "empty",
+                            primary_start,
+                            extra=attempt_extra,
+                        )
+                    )
+            except Exception as e:
+                error_result = _primary_search_exception_result(start, session_id, query, candidate_config["mode"], search_provider.get_provider_name(), e)
+                last_primary_error = error_result
+                transport_attempts = getattr(search_provider, "last_transport_attempts", [])
+                if _append_openai_transport_attempts(provider_attempts, search_provider, candidate_config):
+                    transport_fallback_used = transport_fallback_used or any(
+                        attempt.get("fallback_from_transport") for attempt in transport_attempts
+                    )
+                if str(candidate_config["provider"]).startswith("openai-compatible"):
+                    attempt_extra["breaker_state"] = _record_openai_model_failure(candidate_config["api_url"], candidate_config["model"])
+                if not str(candidate_config["provider"]).startswith("openai-compatible") or not transport_attempts:
+                    provider_attempts.append(
+                        _attempt(
+                            "main_search",
+                            _openai_attempt_provider_name(candidate_config, search_provider),
+                            "error",
+                            primary_start,
+                            error_type=error_result["error_type"],
+                            error=error_result["error"],
+                            extra=attempt_extra,
+                        )
+                    )
+        if primary_result is not None:
+            break
     if primary_result is None:
         result = last_primary_error or _primary_search_error_result(start, session_id, query, primary_api_mode, "network_error", "搜索失败或无结果")
         result["provider_attempts"] = provider_attempts
         result["providers_used"] = _provider_names_from_attempts(provider_attempts)
         result["fallback_used"] = _fallback_used(provider_attempts)
+        result["transport_fallback_used"] = transport_fallback_used
+        result["model_fallback_used"] = model_fallback_used
         result["routing_decision"] = routing_decision
         result["validation_level"] = validation_level
         result["minimum_profile_ok"] = minimum.get("ok", False)
@@ -2128,6 +2364,8 @@ async def search(
         "providers_used": _provider_names_from_attempts(provider_attempts),
         "provider_attempts": provider_attempts,
         "fallback_used": _fallback_used(provider_attempts),
+        "transport_fallback_used": transport_fallback_used,
+        "model_fallback_used": model_fallback_used,
         "validation_level": validation_level,
         "minimum_profile_ok": minimum.get("ok", False),
         "capability_status": minimum.get("capability_status", {}),
@@ -2654,7 +2892,7 @@ def _primary_search_exception_result(
     provider_name: str,
     exc: BaseException,
 ) -> dict[str, Any]:
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError, TimeoutError)):
         return _primary_search_error_result(
             start,
             session_id,
@@ -3561,6 +3799,7 @@ def current_model() -> dict[str, Any]:
         "ok": True,
         "xai_model": config.xai_model,
         "openai_compatible_model": config.openai_compatible_model,
+        "openai_compatible_fallback_models": config.openai_compatible_fallback_models,
         "config_file": str(config.config_file),
     }
 

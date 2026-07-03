@@ -23,6 +23,7 @@ def _reset_config(monkeypatch, tmp_path):
         "OPENAI_COMPATIBLE_API_URL",
         "OPENAI_COMPATIBLE_API_KEY",
         "OPENAI_COMPATIBLE_MODEL",
+        "OPENAI_COMPATIBLE_FALLBACK_MODELS",
         "OPENAI_COMPATIBLE_STREAM",
         "SMART_SEARCH_INTENT_ROUTER",
         "INTENT_EMBEDDING_API_URL",
@@ -113,6 +114,19 @@ def test_config_file_supplies_explicit_main_settings(monkeypatch, tmp_path):
     assert service.config.openai_compatible_api_url == "https://relay.example.com/v1"
     assert service.config.openai_compatible_api_key == "relay-config-secret"
     assert service.config.openai_compatible_model == "relay-config-model"
+
+
+def test_openai_compatible_fallback_models_are_ordered_deduped_and_reported(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    service.config_set("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    service.config_set("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    service.config_set("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-a, primary-model, fallback-a, fallback-b")
+
+    current_result = service.current_model()
+
+    assert service.config.openai_compatible_fallback_models == ["fallback-a", "fallback-b"]
+    assert current_result["openai_compatible_fallback_models"] == ["fallback-a", "fallback-b"]
 
 
 def test_openai_compatible_stream_config_defaults_and_boolean_styles(monkeypatch, tmp_path):
@@ -945,6 +959,194 @@ async def test_search_passes_openai_compatible_stream_config_and_cli_override(mo
     assert result["ok"] is True
     assert captured["stream"] is expected_stream
     assert result["routing_decision"]["openai_compatible_stream"] is expected_stream
+
+
+@pytest.mark.asyncio
+async def test_search_openai_compatible_primary_model_falls_back_to_configured_model(monkeypatch):
+    service.reset_runtime_breakers()
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-model")
+    seen_models = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        seen_models.append(self.model)
+        self.last_transport_attempts = [
+            {
+                "transport": "non_stream",
+                "status": "empty" if self.model == "primary-model" else "ok",
+                "error_type": "network_error" if self.model == "primary-model" else "",
+                "error": "empty" if self.model == "primary-model" else "",
+                "elapsed_ms": 1,
+                "result_count": 0 if self.model == "primary-model" else 1,
+                "model": self.model,
+            }
+        ]
+        if self.model == "primary-model":
+            return ""
+        return "Fallback answer."
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search("what is example", providers="openai-compatible")
+
+    assert result["ok"] is True
+    assert result["model"] == "fallback-model"
+    assert result["model_fallback_used"] is True
+    assert result["fallback_used"] is True
+    assert seen_models == ["primary-model", "fallback-model"]
+    assert result["routing_decision"]["openai_compatible_models"] == ["primary-model", "fallback-model"]
+    assert any(attempt.get("fallback_from_model") == "primary-model" for attempt in result["provider_attempts"])
+
+
+@pytest.mark.asyncio
+async def test_search_model_override_disables_configured_fallback_models(monkeypatch):
+    service.reset_runtime_breakers()
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-model")
+    seen_models = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        seen_models.append(self.model)
+        return ""
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search("what is example", providers="openai-compatible", model="override-model")
+
+    assert result["ok"] is False
+    assert result["model_fallback_used"] is False
+    assert seen_models == ["override-model"]
+    assert result["routing_decision"]["openai_compatible_models"] == ["override-model"]
+
+
+@pytest.mark.asyncio
+async def test_search_fallback_off_disables_model_fallback_but_keeps_transport_attempts(monkeypatch):
+    service.reset_runtime_breakers()
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
+    seen_models = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        seen_models.append(self.model)
+        self.last_transport_attempts = [
+            {
+                "transport": "stream",
+                "status": "empty",
+                "error_type": "network_error",
+                "error": "empty stream",
+                "elapsed_ms": 1,
+                "result_count": 0,
+                "model": self.model,
+            },
+            {
+                "transport": "non_stream",
+                "status": "ok",
+                "error_type": "",
+                "error": "",
+                "elapsed_ms": 1,
+                "result_count": 1,
+                "model": self.model,
+                "fallback_from_transport": "stream",
+            },
+        ]
+        return "Rescued answer."
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search("what is example", providers="openai-compatible", fallback="off")
+
+    assert result["ok"] is True
+    assert seen_models == ["primary-model"]
+    assert result["transport_fallback_used"] is True
+    assert result["model_fallback_used"] is False
+    assert result["fallback_used"] is False
+    assert result["routing_decision"]["openai_compatible_model_fallback_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_model_breaker_skips_primary_model(monkeypatch):
+    service.reset_runtime_breakers()
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-model")
+    service._record_openai_model_failure("https://relay.example.com/v1", "primary-model")
+    service._record_openai_model_failure("https://relay.example.com/v1", "primary-model")
+    seen_models = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        seen_models.append(self.model)
+        return "Fallback answer."
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search("what is example", providers="openai-compatible")
+
+    assert result["ok"] is True
+    assert seen_models == ["fallback-model"]
+    assert result["model"] == "fallback-model"
+    assert result["model_fallback_used"] is True
+    assert result["provider_attempts"][0]["status"] == "skipped"
+    assert result["provider_attempts"][0]["breaker_state"]["state"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_search_model_breaker_does_not_skip_exact_model_request(monkeypatch):
+    service.reset_runtime_breakers()
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-model")
+    service._record_openai_model_failure("https://relay.example.com/v1", "primary-model")
+    service._record_openai_model_failure("https://relay.example.com/v1", "primary-model")
+    seen_models = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        seen_models.append(self.model)
+        return "Primary answer."
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search("what is example", providers="openai-compatible", model="primary-model")
+
+    assert result["ok"] is True
+    assert seen_models == ["primary-model"]
+    assert result["model"] == "primary-model"
+    assert result["model_fallback_used"] is False
+    assert not any(attempt["status"] == "skipped" for attempt in result["provider_attempts"])
+
+
+@pytest.mark.asyncio
+async def test_search_model_breaker_does_not_skip_when_fallback_off(monkeypatch):
+    service.reset_runtime_breakers()
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "primary-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "fallback-model")
+    service._record_openai_model_failure("https://relay.example.com/v1", "primary-model")
+    service._record_openai_model_failure("https://relay.example.com/v1", "primary-model")
+    seen_models = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        seen_models.append(self.model)
+        return "Primary answer."
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search("what is example", providers="openai-compatible", fallback="off")
+
+    assert result["ok"] is True
+    assert seen_models == ["primary-model"]
+    assert result["model"] == "primary-model"
+    assert result["model_fallback_used"] is False
+    assert not any(attempt["status"] == "skipped" for attempt in result["provider_attempts"])
 
 
 def test_anysearch_vertical_status_is_experimental_and_not_minimum_required(monkeypatch):
@@ -2127,10 +2329,12 @@ def test_named_openai_compatible_pool_configs_expand_ids_in_order(monkeypatch, t
 
     monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "grok-main,grok_backup")
     monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_FALLBACK_MODELS", "global-fallback")
     monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "true")
     monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_URL", "https://relay1.example.com/v1")
     monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_API_KEY", "abcd1234WXYZ")
     monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_MODEL", "relay-model-1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_MAIN_FALLBACK_MODELS", "relay-model-1,relay-model-1b")
     monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_URL", "https://relay2.example.com/v1")
     monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_API_KEY", "pqrs5678LMNO")
     monkeypatch.setenv("OPENAI_COMPATIBLE_GROK_BACKUP_STREAM", "false")
@@ -2146,6 +2350,7 @@ def test_named_openai_compatible_pool_configs_expand_ids_in_order(monkeypatch, t
         "https://relay2.example.com/v1",
     ]
     assert [item["model"] for item in configs] == ["relay-model-1", "shared-model"]
+    assert [item["fallback_models"] for item in configs] == [["relay-model-1b"], ["global-fallback"]]
     assert [item["stream"] for item in configs] == [True, False]
     assert [item["source"] for item in configs] == [
         "OPENAI_COMPATIBLE_GROK_MAIN_*",
@@ -2240,6 +2445,58 @@ async def test_search_falls_through_openai_compatible_pool_in_order(monkeypatch,
         ("https://relay1.example.com/v1", "abcd1234WXYZ", "relay-model-1", True),
         ("https://relay2.example.com/v1", "pqrs5678LMNO", "shared-model", False),
     ]
+
+
+@pytest.mark.asyncio
+async def test_search_pool_transport_attempts_preserve_configured_provider_identity(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PROVIDERS", "primary,backup")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "shared-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PRIMARY_API_URL", "https://relay1.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_PRIMARY_API_KEY", "abcd1234WXYZ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BACKUP_API_URL", "https://relay2.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BACKUP_API_KEY", "pqrs5678LMNO")
+
+    async def pooled_openai(self, query, platform="", ctx=None):
+        if self.api_url == "https://relay1.example.com/v1":
+            self.last_transport_attempts = [
+                {
+                    "transport": "non_stream",
+                    "status": "error",
+                    "error_type": "network_error",
+                    "error": "relay1 unavailable",
+                    "elapsed_ms": 1,
+                    "result_count": 0,
+                    "model": self.model,
+                }
+            ]
+            return ""
+        self.last_transport_attempts = [
+            {
+                "transport": "non_stream",
+                "status": "ok",
+                "error_type": "",
+                "error": "",
+                "elapsed_ms": 1,
+                "result_count": 1,
+                "model": self.model,
+            }
+        ]
+        return "Fallback answer."
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", pooled_openai)
+
+    result = await service.search("what is example")
+
+    main_attempts = [attempt for attempt in result["provider_attempts"] if attempt["capability"] == "main_search"]
+    assert result["ok"] is True
+    assert result["fallback_used"] is True
+    assert [attempt["provider"] for attempt in main_attempts[:2]] == [
+        "openai-compatible:primary",
+        "openai-compatible:backup",
+    ]
+    assert result["providers_used"] == ["openai-compatible:backup"]
 
 
 @pytest.mark.asyncio

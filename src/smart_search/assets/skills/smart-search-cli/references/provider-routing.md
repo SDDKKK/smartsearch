@@ -111,7 +111,10 @@ AnySearch:
 OpenAI-compatible streaming:
 
 - `OPENAI_COMPATIBLE_STREAM` defaults to `false` and accepts `true`, `1`, or `yes` as true.
-- `search --stream` and `search --no-stream` override `OPENAI_COMPATIBLE_STREAM` for the current invocation.
+- `search --stream` means "prefer stream first"; stream empty/timeout/retryable protocol failures fall back to the same provider/model with `stream=false`.
+- `search --no-stream` forces `stream=false` for the current invocation.
+- `OPENAI_COMPATIBLE_FALLBACK_MODELS` is an optional comma-separated ordered list. It is tried only after the primary OpenAI-compatible model fails, and `--fallback off` or `--model MODEL` disables this model fallback for the invocation.
+- OpenAI-compatible attempts may include `model`, `transport`, `fallback_from_transport`, `fallback_from_model`, and `breaker_state`. `transport_fallback_used` records stream-to-non-stream recovery separately from provider/model `fallback_used`.
 - Streaming applies only to OpenAI-compatible `search()` and provider-side `fetch()` calls. `describe_url()` and `rank_sources()` stay non-streaming. xAI Responses behavior is unchanged.
 
 Exa domain filters:
