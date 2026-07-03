@@ -464,6 +464,15 @@ def _attempt_timeout_seconds(
     return max(0.001, min(30.0, remaining_budget / 2.0))
 
 
+def _openai_attempt_provider_name(candidate_config: dict[str, Any], search_provider: Any | None = None) -> str:
+    provider_id = str(candidate_config.get("provider") or "")
+    if provider_id.startswith(("openai-compatible:", "openai-compatible-")):
+        return provider_id
+    if search_provider is not None:
+        return search_provider.get_provider_name()
+    return "OpenAI-compatible"
+
+
 def _append_openai_transport_attempts(
     provider_attempts: list[dict],
     search_provider: Any,
@@ -472,6 +481,7 @@ def _append_openai_transport_attempts(
     transport_attempts = getattr(search_provider, "last_transport_attempts", [])
     if not str(candidate_config.get("provider", "")).startswith("openai-compatible") or not transport_attempts:
         return False
+    provider_name = _openai_attempt_provider_name(candidate_config, search_provider)
     for transport_attempt in transport_attempts:
         transport_extra = {
             key: value
@@ -484,7 +494,7 @@ def _append_openai_transport_attempts(
             {
                 **_attempt(
                     "main_search",
-                    search_provider.get_provider_name(),
+                    provider_name,
                     transport_attempt.get("status", "error"),
                     time.time(),
                     result_count=int(transport_attempt.get("result_count") or 0),
@@ -2176,12 +2186,13 @@ async def search(
                     attempt_extra["fallback_from_model"] = candidate_config["fallback_from_model"]
                     model_fallback_used = True
                 breaker_state = _openai_model_breaker_state(candidate_config["api_url"], candidate_config["model"])
-                if breaker_state.get("state") == "open":
+                model_breaker_can_skip = fallback_mode != "off" and not model
+                if model_breaker_can_skip and breaker_state.get("state") == "open":
                     attempt_extra["breaker_state"] = breaker_state
                     provider_attempts.append(
                         _attempt(
                             "main_search",
-                            "OpenAI-compatible",
+                            _openai_attempt_provider_name(candidate_config),
                             "skipped",
                             primary_start,
                             error_type="network_error",
@@ -2212,7 +2223,7 @@ async def search(
                         provider_attempts.append(
                             _attempt(
                                 "main_search",
-                                search_provider.get_provider_name(),
+                                _openai_attempt_provider_name(candidate_config, search_provider),
                                 "ok",
                                 primary_start,
                                 result_count=1,
@@ -2234,7 +2245,13 @@ async def search(
                 )
                 if not str(candidate_config["provider"]).startswith("openai-compatible") or not transport_attempts:
                     provider_attempts.append(
-                        _attempt("main_search", search_provider.get_provider_name(), "empty", primary_start, extra=attempt_extra)
+                        _attempt(
+                            "main_search",
+                            _openai_attempt_provider_name(candidate_config, search_provider),
+                            "empty",
+                            primary_start,
+                            extra=attempt_extra,
+                        )
                     )
             except Exception as e:
                 error_result = _primary_search_exception_result(start, session_id, query, candidate_config["mode"], search_provider.get_provider_name(), e)
@@ -2250,7 +2267,7 @@ async def search(
                     provider_attempts.append(
                         _attempt(
                             "main_search",
-                            search_provider.get_provider_name(),
+                            _openai_attempt_provider_name(candidate_config, search_provider),
                             "error",
                             primary_start,
                             error_type=error_result["error_type"],
