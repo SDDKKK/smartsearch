@@ -1,9 +1,10 @@
 import httpx
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential
 from tenacity.wait import wait_base
 from .base import BaseSearchProvider, SearchResult
@@ -13,6 +14,9 @@ from ..config import config
 
 _logger = logging.getLogger(__name__)
 _ssl_warning_emitted = False
+_STREAM_BREAKERS: dict[tuple[str, str], dict[str, Any]] = {}
+STREAM_BREAKER_FAILURE_THRESHOLD = 2
+STREAM_BREAKER_COOLDOWN_SECONDS = 600.0
 
 
 def get_local_time_info() -> str:
@@ -42,6 +46,34 @@ def _is_retryable_exception(exc) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code in RETRYABLE_STATUS_CODES
     return False
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.time() - start) * 1000, 2)
+
+
+def _transport_error_type(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, (httpx.HTTPStatusError, httpx.RequestError)):
+        return "network_error"
+    return "runtime_error"
+
+
+def _transport_error_message(exc: BaseException) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        body = exc.response.text[:300] if exc.response is not None else str(exc)
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        return f"HTTP {status}: {body}"
+    return str(exc)
+
+
+def _stream_breaker_key(api_url: str, model: str) -> tuple[str, str]:
+    return (api_url.rstrip("/"), model)
+
+
+def reset_openai_compatible_breakers() -> None:
+    _STREAM_BREAKERS.clear()
 
 
 class _WaitWithRetryAfter(wait_base):
@@ -82,9 +114,10 @@ class _WaitWithRetryAfter(wait_base):
 
 class OpenAICompatibleSearchProvider(BaseSearchProvider):
     def __init__(self, api_url: str, api_key: str, model: str = "grok-4-fast", stream: bool = False):
-        super().__init__(api_url, api_key)
+        super().__init__(api_url.rstrip("/"), api_key)
         self.model = model
         self.stream = stream
+        self.last_transport_attempts: list[dict[str, Any]] = []
 
     def get_provider_name(self) -> str:
         return "OpenAI-compatible"
@@ -128,9 +161,7 @@ class OpenAICompatibleSearchProvider(BaseSearchProvider):
 
         await log_info(ctx, f"platform_prompt: { query + platform_prompt}", config.debug_enabled)
 
-        if self.stream:
-            return await self._execute_stream_with_retry(headers, payload, ctx)
-        return await self._execute_completion_with_retry(headers, payload, ctx)
+        return await self._execute_with_transport_fallback(headers, payload, ctx)
 
     async def fetch(self, url: str, ctx=None) -> str:
         headers = self._build_api_headers()
@@ -145,9 +176,149 @@ class OpenAICompatibleSearchProvider(BaseSearchProvider):
             ],
             "stream": self.stream,
         }
-        if self.stream:
-            return await self._execute_stream_with_retry(headers, payload, ctx)
-        return await self._execute_completion_with_retry(headers, payload, ctx)
+        return await self._execute_with_transport_fallback(headers, payload, ctx)
+
+    def _breaker_state(self) -> dict[str, Any]:
+        state = _STREAM_BREAKERS.get(_stream_breaker_key(self.api_url, self.model), {})
+        opened_until = float(state.get("opened_until") or 0.0)
+        now = time.monotonic()
+        if opened_until and opened_until > now:
+            return {
+                "state": "open",
+                "opened_until_seconds": round(opened_until - now, 3),
+                "consecutive_failures": int(state.get("consecutive_failures") or 0),
+            }
+        if opened_until and opened_until <= now:
+            _STREAM_BREAKERS.pop(_stream_breaker_key(self.api_url, self.model), None)
+        return {"state": "closed", "consecutive_failures": int(state.get("consecutive_failures") or 0)}
+
+    def _record_stream_success(self) -> None:
+        _STREAM_BREAKERS.pop(_stream_breaker_key(self.api_url, self.model), None)
+
+    def _record_stream_failure(self) -> dict[str, Any]:
+        key = _stream_breaker_key(self.api_url, self.model)
+        state = _STREAM_BREAKERS.setdefault(key, {"consecutive_failures": 0, "opened_until": 0.0})
+        state["consecutive_failures"] = int(state.get("consecutive_failures") or 0) + 1
+        if state["consecutive_failures"] >= STREAM_BREAKER_FAILURE_THRESHOLD:
+            state["opened_until"] = time.monotonic() + STREAM_BREAKER_COOLDOWN_SECONDS
+        return self._breaker_state()
+
+    def _transport_attempt(
+        self,
+        transport: str,
+        status: str,
+        start: float,
+        *,
+        error_type: str = "",
+        error: str = "",
+        breaker_state: dict[str, Any] | None = None,
+        fallback_from_transport: str = "",
+    ) -> dict[str, Any]:
+        attempt: dict[str, Any] = {
+            "transport": transport,
+            "status": status,
+            "error_type": error_type,
+            "error": error,
+            "elapsed_ms": _elapsed_ms(start),
+            "result_count": 1 if status == "ok" else 0,
+            "model": self.model,
+        }
+        if breaker_state:
+            attempt["breaker_state"] = breaker_state
+        if fallback_from_transport:
+            attempt["fallback_from_transport"] = fallback_from_transport
+        return attempt
+
+    async def _execute_with_transport_fallback(self, headers: dict, payload: dict, ctx=None) -> str:
+        self.last_transport_attempts = []
+        if not self.stream:
+            payload["stream"] = False
+            start = time.time()
+            try:
+                content = await self._execute_completion_with_retry(headers, payload, ctx)
+                self.last_transport_attempts.append(self._transport_attempt("non_stream", "ok" if content else "empty", start))
+                return content
+            except Exception as e:
+                self.last_transport_attempts.append(
+                    self._transport_attempt(
+                        "non_stream",
+                        "error",
+                        start,
+                        error_type=_transport_error_type(e),
+                        error=_transport_error_message(e),
+                    )
+                )
+                raise
+
+        breaker_state = self._breaker_state()
+        if breaker_state.get("state") == "open":
+            self.last_transport_attempts.append(
+                self._transport_attempt("stream", "skipped", time.time(), breaker_state=breaker_state, error="stream breaker open")
+            )
+        else:
+            payload["stream"] = True
+            stream_start = time.time()
+            try:
+                content = await self._execute_stream_with_retry(headers, payload, ctx)
+                if content and content.strip():
+                    self._record_stream_success()
+                    self.last_transport_attempts.append(
+                        self._transport_attempt("stream", "ok", stream_start, breaker_state=self._breaker_state())
+                    )
+                    return content
+                breaker_state = self._record_stream_failure()
+                self.last_transport_attempts.append(
+                    self._transport_attempt(
+                        "stream",
+                        "empty",
+                        stream_start,
+                        error_type="network_error",
+                        error="OpenAI-compatible stream returned empty content",
+                        breaker_state=breaker_state,
+                    )
+                )
+            except Exception as e:
+                breaker_state = self._record_stream_failure()
+                self.last_transport_attempts.append(
+                    self._transport_attempt(
+                        "stream",
+                        "error",
+                        stream_start,
+                        error_type=_transport_error_type(e),
+                        error=_transport_error_message(e),
+                        breaker_state=breaker_state,
+                    )
+                )
+                if not _is_retryable_exception(e):
+                    raise
+
+        payload["stream"] = False
+        completion_start = time.time()
+        try:
+            content = await self._execute_completion_with_retry(headers, payload, ctx)
+            self.last_transport_attempts.append(
+                self._transport_attempt(
+                    "non_stream",
+                    "ok" if content else "empty",
+                    completion_start,
+                    error_type="" if content else "network_error",
+                    error="" if content else "OpenAI-compatible non-stream returned empty content",
+                    fallback_from_transport="stream",
+                )
+            )
+            return content
+        except Exception as e:
+            self.last_transport_attempts.append(
+                self._transport_attempt(
+                    "non_stream",
+                    "error",
+                    completion_start,
+                    error_type=_transport_error_type(e),
+                    error=_transport_error_message(e),
+                    fallback_from_transport="stream",
+                )
+            )
+            raise
 
     async def _parse_streaming_response(self, response, ctx=None) -> str:
         content = ""

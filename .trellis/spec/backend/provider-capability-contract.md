@@ -212,9 +212,16 @@ Provider configuration:
 - `OPENAI_COMPATIBLE_API_URL` plus `OPENAI_COMPATIBLE_API_KEY` registers
   `openai-compatible`.
 - `OPENAI_COMPATIBLE_MODEL` configures the compatible route.
+- `OPENAI_COMPATIBLE_FALLBACK_MODELS` optionally configures comma-separated
+  backup model ids for the same OpenAI-compatible route. The list is ordered,
+  empty entries are ignored, duplicates and the primary model are skipped, and
+  the same model suffix normalization as `OPENAI_COMPATIBLE_MODEL` applies.
 - `OPENAI_COMPATIBLE_STREAM` is an opt-in relay compatibility switch. It
   defaults to `false`, accepts `true`, `1`, or `yes`, and may be overridden for
-  one `search` call with `--stream` or `--no-stream`.
+  one `search` call with `--stream` or `--no-stream`. `--stream` means prefer
+  stream first; empty, timeout, network, protocol, and retryable upstream
+  stream failures must fall back to the same provider/model with
+  `stream=false`.
 - Official xAI calls use the Responses API `/responses` route through `XAI_*`.
 - Compatible relays/gateways use Chat Completions `/chat/completions` through
   `OPENAI_COMPATIBLE_*`.
@@ -280,6 +287,19 @@ Main-search peer rule:
 - The OpenAI-compatible stream switch changes only the request transport for
   OpenAI-compatible `search()` and provider-side `fetch()`. It must not affect
   xAI Responses, URL description, source ranking, or capability routing.
+- OpenAI-compatible stream failures are guarded by a process-local breaker keyed
+  by `api_url + model`; two consecutive stream failures open the breaker for
+  10 minutes and skip stream attempts for that model. Non-stream success does
+  not reset the stream breaker; a later stream success resets it.
+- OpenAI-compatible model fallback is same-provider fallback, not provider
+  fabrication. Fallback models default to non-stream first. `search --model`
+  is an exact model diagnostic and disables configured fallback models.
+  `--fallback off` disables provider fallback and OpenAI-compatible model
+  fallback, but not same-model stream-to-non-stream transport fallback.
+- OpenAI-compatible primary model instability is guarded by a process-local
+  model breaker keyed by `api_url + model`; two consecutive whole-model
+  failures open the breaker for 10 minutes and skip that model in favor of
+  configured fallback models without writing config.
 
 Intent router contract:
 
@@ -476,6 +496,16 @@ Output contracts:
   `degraded`, `route_policy_version`, and `evidence_dir`.
 - `search` must expose the effective OpenAI-compatible stream decision in
   `routing_decision.openai_compatible_stream` when that provider is attempted.
+  This is the stream preference, not proof that the final transport was stream.
+- `search` must expose the OpenAI-compatible model candidates used for the
+  invocation in `routing_decision.openai_compatible_models` and whether model
+  fallback was enabled in
+  `routing_decision.openai_compatible_model_fallback_enabled`.
+- `provider_attempts` may add OpenAI-compatible fields `model`, `transport`,
+  `fallback_from_transport`, `fallback_from_model`, and `breaker_state` while
+  preserving the base attempt fields. `transport_fallback_used` reports
+  stream-to-non-stream recovery separately; `fallback_used` continues to mean
+  provider or model fallback and must not be set by transport fallback alone.
 - AnySearch command output must include `provider="anysearch"`, `tool`,
   `content`/`raw_content` when available, `results`, and `elapsed_ms` on
   success. Failures must include stable `ok=false`, `error_type`, `error`,

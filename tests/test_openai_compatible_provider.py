@@ -1,6 +1,7 @@
+import httpx
 import pytest
 
-from smart_search.providers.openai_compatible import OpenAICompatibleSearchProvider
+from smart_search.providers.openai_compatible import OpenAICompatibleSearchProvider, reset_openai_compatible_breakers
 
 
 class DummyResponse:
@@ -59,12 +60,13 @@ async def test_fetch_uses_non_stream(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_search_stream_true_uses_streaming_executor(monkeypatch):
+async def test_search_stream_true_prefers_streaming_executor(monkeypatch):
+    reset_openai_compatible_breakers()
     provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=True)
     captured = {}
 
     async def should_not_call_completion(headers, payload, ctx):
-        raise AssertionError("stream=true must use the streaming executor")
+        raise AssertionError("completion should not run when stream succeeds")
 
     async def fake_stream(headers, payload, ctx):
         captured["headers"] = headers
@@ -78,15 +80,18 @@ async def test_search_stream_true_uses_streaming_executor(monkeypatch):
 
     assert result == "streamed search"
     assert captured["payload"]["stream"] is True
+    assert provider.last_transport_attempts[0]["transport"] == "stream"
+    assert provider.last_transport_attempts[0]["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_fetch_stream_true_uses_streaming_executor(monkeypatch):
+async def test_fetch_stream_true_prefers_streaming_executor(monkeypatch):
+    reset_openai_compatible_breakers()
     provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=True)
     captured = {}
 
     async def should_not_call_completion(headers, payload, ctx):
-        raise AssertionError("stream=true must use the streaming executor")
+        raise AssertionError("completion should not run when stream succeeds")
 
     async def fake_stream(headers, payload, ctx):
         captured["payload"] = payload
@@ -99,6 +104,102 @@ async def test_fetch_stream_true_uses_streaming_executor(monkeypatch):
 
     assert result == "streamed fetch"
     assert captured["payload"]["stream"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_stream_empty_falls_back_to_non_stream(monkeypatch):
+    reset_openai_compatible_breakers()
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=True)
+    payloads = []
+
+    async def fake_stream(headers, payload, ctx):
+        payloads.append(dict(payload))
+        return ""
+
+    async def fake_completion(headers, payload, ctx):
+        payloads.append(dict(payload))
+        return "non-stream answer"
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", fake_stream)
+    monkeypatch.setattr(provider, "_execute_completion_with_retry", fake_completion)
+
+    result = await provider.search("stream query")
+
+    assert result == "non-stream answer"
+    assert [payload["stream"] for payload in payloads] == [True, False]
+    assert [attempt["status"] for attempt in provider.last_transport_attempts] == ["empty", "ok"]
+    assert provider.last_transport_attempts[1]["fallback_from_transport"] == "stream"
+
+
+@pytest.mark.asyncio
+async def test_search_stream_retryable_exception_falls_back_to_non_stream(monkeypatch):
+    reset_openai_compatible_breakers()
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=True)
+
+    async def fake_stream(headers, payload, ctx):
+        raise httpx.RemoteProtocolError("bad sse")
+
+    async def fake_completion(headers, payload, ctx):
+        return "non-stream answer"
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", fake_stream)
+    monkeypatch.setattr(provider, "_execute_completion_with_retry", fake_completion)
+
+    result = await provider.search("stream query")
+
+    assert result == "non-stream answer"
+    assert [attempt["status"] for attempt in provider.last_transport_attempts] == ["error", "ok"]
+    assert provider.last_transport_attempts[0]["error_type"] == "network_error"
+
+
+@pytest.mark.asyncio
+async def test_search_stream_then_non_stream_error_records_both_attempts(monkeypatch):
+    reset_openai_compatible_breakers()
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=True)
+
+    async def fake_stream(headers, payload, ctx):
+        return ""
+
+    async def fake_completion(headers, payload, ctx):
+        raise httpx.TimeoutException("slow")
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", fake_stream)
+    monkeypatch.setattr(provider, "_execute_completion_with_retry", fake_completion)
+
+    with pytest.raises(httpx.TimeoutException):
+        await provider.search("stream query")
+
+    assert [attempt["transport"] for attempt in provider.last_transport_attempts] == ["stream", "non_stream"]
+    assert [attempt["status"] for attempt in provider.last_transport_attempts] == ["empty", "error"]
+    assert provider.last_transport_attempts[1]["fallback_from_transport"] == "stream"
+    assert provider.last_transport_attempts[1]["error_type"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_stream_breaker_opens_after_two_failures_and_skips_stream(monkeypatch):
+    reset_openai_compatible_breakers()
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=True)
+    stream_calls = 0
+
+    async def fake_stream(headers, payload, ctx):
+        nonlocal stream_calls
+        stream_calls += 1
+        return ""
+
+    async def fake_completion(headers, payload, ctx):
+        return "non-stream answer"
+
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", fake_stream)
+    monkeypatch.setattr(provider, "_execute_completion_with_retry", fake_completion)
+
+    assert await provider.search("q1") == "non-stream answer"
+    assert await provider.search("q2") == "non-stream answer"
+    assert await provider.search("q3") == "non-stream answer"
+
+    assert stream_calls == 2
+    assert provider.last_transport_attempts[0]["transport"] == "stream"
+    assert provider.last_transport_attempts[0]["status"] == "skipped"
+    assert provider.last_transport_attempts[0]["breaker_state"]["state"] == "open"
 
 
 @pytest.mark.asyncio
