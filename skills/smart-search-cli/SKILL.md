@@ -35,7 +35,7 @@ Use the local `smart-search` command as the default execution layer for web rese
 
 ## Key Boundaries
 
-- `smart-search` should resolve from the user's PATH.
+- `smart-search` should resolve from the user's PATH. On Hiskens WSL, prefer `/home/hcx/.local/bin/smart-search` (loads `~/.config/hermes/smart-search.env` + fork). Do not use Homebrew `@konbakuyomu/smart-search` unless testing packaging. `XAI_API_KEY` empty is fine when `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` are set.
 - Private API keys should be saved with `smart-search setup` or `smart-search config set`; environment variables remain supported for CI and advanced users.
 - In sandboxed runtimes, set `SMART_SEARCH_CONFIG_DIR` to an absolute writable path when the default config directory is unavailable or must be pinned.
 - The standard minimum profile requires one configured provider in each of `main_search`, `docs_search`, and fetch capability. Missing required capabilities are hard configuration failures.
