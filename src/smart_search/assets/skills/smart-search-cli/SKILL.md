@@ -53,3 +53,4 @@ Use the local `smart-search` command as the default execution layer for web rese
 - Intent routing, provider capabilities, source provenance, fallback boundaries, and routing maintenance: `references/provider-routing.md`
 - Regression, packaged install checks, release lanes, and release closeout lessons: `references/regression-release.md`
 - Compatibility reference map for older instructions that mention the original monolithic file: `references/cli-contract.md`
+- Local PATH wrapper and 1Password-backed provider pool: `references/local-wrapper.md`

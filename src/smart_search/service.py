@@ -303,6 +303,35 @@ MODEL_BREAKER_COOLDOWN_SECONDS = 600.0
 _OPENAI_COMPATIBLE_MODEL_BREAKERS: dict[tuple[str, str], dict[str, Any]] = {}
 
 
+def _is_openai_compatible_provider(provider_id: str) -> bool:
+    return str(provider_id).startswith("openai-compatible")
+
+
+def _main_search_provider_aliases(provider_id: str) -> set[str]:
+    if provider_id.startswith("openai-compatible:"):
+        pool_id = provider_id.split(":", 1)[1]
+        aliases = set(MAIN_SEARCH_PROVIDER_ALIASES["openai-compatible"]) | {provider_id, pool_id}
+        aliases.add(pool_id.replace("-", "_"))
+        aliases.add(pool_id.replace("_", "-"))
+        return aliases
+    if provider_id.startswith("openai-compatible-"):
+        return set(MAIN_SEARCH_PROVIDER_ALIASES["openai-compatible"]) | {provider_id}
+    return MAIN_SEARCH_PROVIDER_ALIASES.get(provider_id, {provider_id})
+
+
+def _main_search_fallback_chain() -> list[str]:
+    return ["xai-responses", *[str(item["provider"]) for item in config.openai_compatible_provider_configs()]]
+
+
+def _openai_attempt_provider_name(candidate_config: dict[str, Any], search_provider: Any | None = None) -> str:
+    provider_id = str(candidate_config.get("provider") or "")
+    if provider_id.startswith(("openai-compatible:", "openai-compatible-")):
+        return provider_id
+    if search_provider is not None:
+        return search_provider.get_provider_name()
+    return "OpenAI-compatible"
+
+
 def _elapsed_ms(start: float) -> float:
     return round((time.time() - start) * 1000, 2)
 
@@ -486,8 +515,9 @@ def _append_openai_transport_attempts(
     candidate_config: dict[str, Any],
 ) -> bool:
     transport_attempts = getattr(search_provider, "last_transport_attempts", [])
-    if candidate_config.get("provider") != "openai-compatible" or not transport_attempts:
+    if not _is_openai_compatible_provider(str(candidate_config.get("provider") or "")) or not transport_attempts:
         return False
+    provider_name = _openai_attempt_provider_name(candidate_config, search_provider)
     for transport_attempt in transport_attempts:
         transport_extra = {
             key: value
@@ -500,7 +530,7 @@ def _append_openai_transport_attempts(
             {
                 **_attempt(
                     "main_search",
-                    search_provider.get_provider_name(),
+                    provider_name,
                     transport_attempt.get("status", "error"),
                     time.time(),
                     result_count=int(transport_attempt.get("result_count") or 0),
@@ -1591,7 +1621,7 @@ def get_capability_status() -> dict[str, Any]:
     status = {
         "main_search": {
             "configured": main_configured,
-            "fallback_chain": MAIN_SEARCH_FALLBACK_CHAIN,
+            "fallback_chain": _main_search_fallback_chain(),
             "ok": bool(main_configured),
         },
         "web_search": {
@@ -1682,7 +1712,7 @@ def _parse_provider_filter(providers: str = "auto") -> set[str] | None:
 def _provider_allowed(provider_id: str, provider_filter: set[str] | None) -> bool:
     if provider_filter is None:
         return True
-    aliases = MAIN_SEARCH_PROVIDER_ALIASES.get(provider_id, {provider_id})
+    aliases = _main_search_provider_aliases(provider_id)
     return bool(provider_filter.intersection(aliases))
 
 
@@ -1691,10 +1721,9 @@ def _configured_main_search_provider_ids() -> list[str]:
 
     if config.xai_api_key:
         configured.add("xai-responses")
-    if config.openai_compatible_api_url and config.openai_compatible_api_key:
-        configured.add("openai-compatible")
+    configured.update(str(item["provider"]) for item in config.openai_compatible_provider_configs())
 
-    return [provider for provider in MAIN_SEARCH_FALLBACK_CHAIN if provider in configured]
+    return [provider for provider in _main_search_fallback_chain() if provider in configured]
 
 
 def _main_search_provider_configs(model_override: str = "", providers: str = "auto") -> list[dict[str, Any]]:
@@ -1712,22 +1741,27 @@ def _main_search_provider_configs(model_override: str = "", providers: str = "au
             "source": "XAI_*",
         }
 
-    if config.openai_compatible_api_url and config.openai_compatible_api_key:
-        by_provider["openai-compatible"] = {
-            "provider": "openai-compatible",
+    for provider in config.openai_compatible_provider_configs():
+        provider_id = str(provider["provider"])
+        api_url = str(provider["api_url"])
+        resolved_model = model_override or str(provider["model"])
+        if model_override:
+            resolved_model = config.apply_model_suffix_for_url(model_override, api_url)
+        by_provider[provider_id] = {
+            "provider": provider_id,
             "mode": "chat-completions",
-            "api_url": config.openai_compatible_api_url,
-            "api_key": config.openai_compatible_api_key,
-            "model": model_override or config.openai_compatible_model,
-            "fallback_models": [] if model_override else config.openai_compatible_fallback_models,
-            "stream": config.openai_compatible_stream,
+            "api_url": api_url,
+            "api_key": str(provider["api_key"]),
+            "model": resolved_model,
+            "fallback_models": [] if model_override else list(provider.get("fallback_models") or []),
+            "stream": bool(provider["stream"]),
             "tools": [],
-            "source": "OPENAI_COMPATIBLE_*",
+            "source": provider["source"],
         }
 
     return [
         by_provider[provider]
-        for provider in MAIN_SEARCH_FALLBACK_CHAIN
+        for provider in _main_search_fallback_chain()
         if provider in by_provider and _provider_allowed(provider, provider_filter)
     ]
 
@@ -2318,7 +2352,7 @@ async def search(
     primary_api_mode = main_provider_configs[0]["mode"]
     if stream is not None:
         for provider_config in main_provider_configs:
-            if provider_config["provider"] == "openai-compatible":
+            if _is_openai_compatible_provider(provider_config["provider"]):
                 provider_config["stream"] = stream
 
     has_tavily = _provider_configured("tavily")
@@ -2345,7 +2379,7 @@ async def search(
         (
             [candidate["model"] for candidate in _openai_model_candidates(item, fallback_mode=fallback_mode, model_override=model)]
             for item in selected_main_provider_configs
-            if item["provider"] == "openai-compatible"
+            if _is_openai_compatible_provider(item["provider"])
         ),
         [],
     )
@@ -2355,7 +2389,7 @@ async def search(
         "fallback_mode": fallback_mode,
         "providers": providers,
         "main_search_chain": [item["provider"] for item in selected_main_provider_configs],
-        "openai_compatible_stream": next((bool(item.get("stream")) for item in selected_main_provider_configs if item["provider"] == "openai-compatible"), False),
+        "openai_compatible_stream": next((bool(item.get("stream")) for item in selected_main_provider_configs if _is_openai_compatible_provider(item["provider"])), False),
         "openai_compatible_models": openai_candidate_models,
         "openai_compatible_model_fallback_enabled": len(openai_candidate_models) > 1,
     }
@@ -2369,7 +2403,7 @@ async def search(
     transport_fallback_used = False
     total_main_candidates = sum(
         len(_openai_model_candidates(item, fallback_mode=fallback_mode, model_override=model))
-        if item["provider"] == "openai-compatible"
+        if _is_openai_compatible_provider(item["provider"])
         else 1
         for item in selected_main_provider_configs
     )
@@ -2377,7 +2411,7 @@ async def search(
     for provider_config in selected_main_provider_configs:
         provider_candidates = (
             _openai_model_candidates(provider_config, fallback_mode=fallback_mode, model_override=model)
-            if provider_config["provider"] == "openai-compatible"
+            if _is_openai_compatible_provider(provider_config["provider"])
             else [provider_config]
         )
         for candidate_config in provider_candidates:
@@ -2385,19 +2419,20 @@ async def search(
             primary_start = time.time()
             search_provider = _main_search_providers([candidate_config], fallback="auto")[0]
             attempt_extra: dict[str, Any] = {}
-            if candidate_config["provider"] == "openai-compatible":
+            if _is_openai_compatible_provider(candidate_config["provider"]):
                 attempt_extra["model"] = candidate_config["model"]
                 attempt_extra["model_role"] = candidate_config.get("model_role", "primary")
                 if candidate_config.get("fallback_from_model"):
                     attempt_extra["fallback_from_model"] = candidate_config["fallback_from_model"]
                     model_fallback_used = True
                 breaker_state = _openai_model_breaker_state(candidate_config["api_url"], candidate_config["model"])
-                if breaker_state.get("state") == "open":
+                model_breaker_can_skip = fallback_mode != "off" and not model
+                if model_breaker_can_skip and breaker_state.get("state") == "open":
                     attempt_extra["breaker_state"] = breaker_state
                     provider_attempts.append(
                         _attempt(
                             "main_search",
-                            "OpenAI-compatible",
+                            _openai_attempt_provider_name(candidate_config),
                             "skipped",
                             primary_start,
                             error_type="network_error",
@@ -2424,7 +2459,7 @@ async def search(
                 if candidate_result:
                     primary_result = candidate_result
                     successful_main_config = candidate_config
-                    if candidate_config["provider"] != "openai-compatible" or not transport_attempts:
+                    if not _is_openai_compatible_provider(candidate_config["provider"]) or not transport_attempts:
                         provider_attempts.append(
                             _attempt(
                                 "main_search",
@@ -2435,10 +2470,10 @@ async def search(
                                 extra=attempt_extra,
                             )
                         )
-                    if candidate_config["provider"] == "openai-compatible":
+                    if _is_openai_compatible_provider(candidate_config["provider"]):
                         _record_openai_model_success(candidate_config["api_url"], candidate_config["model"])
                     break
-                if candidate_config["provider"] == "openai-compatible":
+                if _is_openai_compatible_provider(candidate_config["provider"]):
                     attempt_extra["breaker_state"] = _record_openai_model_failure(candidate_config["api_url"], candidate_config["model"])
                 last_primary_error = _primary_search_error_result(
                     start,
@@ -2448,7 +2483,7 @@ async def search(
                     "network_error",
                     f"{search_provider.get_provider_name()} 返回空结果",
                 )
-                if candidate_config["provider"] != "openai-compatible" or not transport_attempts:
+                if not _is_openai_compatible_provider(candidate_config["provider"]) or not transport_attempts:
                     provider_attempts.append(
                         _attempt("main_search", search_provider.get_provider_name(), "empty", primary_start, extra=attempt_extra)
                     )
@@ -2460,9 +2495,9 @@ async def search(
                     transport_fallback_used = transport_fallback_used or any(
                         attempt.get("fallback_from_transport") for attempt in transport_attempts
                     )
-                if candidate_config["provider"] == "openai-compatible":
+                if _is_openai_compatible_provider(candidate_config["provider"]):
                     attempt_extra["breaker_state"] = _record_openai_model_failure(candidate_config["api_url"], candidate_config["model"])
-                if candidate_config["provider"] != "openai-compatible" or not transport_attempts:
+                if not _is_openai_compatible_provider(candidate_config["provider"]) or not transport_attempts:
                     provider_attempts.append(
                         _attempt(
                             "main_search",
@@ -4231,7 +4266,7 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
     minimum_status = {
         "main_search": {
             "configured": ["xai-responses", "openai-compatible"],
-            "fallback_chain": MAIN_SEARCH_FALLBACK_CHAIN,
+            "fallback_chain": _main_search_fallback_chain(),
             "ok": True,
         },
         "web_search": {"configured": ["zhipu"], "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"], "ok": True},
